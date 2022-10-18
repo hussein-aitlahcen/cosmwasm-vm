@@ -1,0 +1,20 @@
+[package]
+name = "typescript-bindings"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-minimal-std =  { path = "../std", default-features = false, features = [ "iterator" ] }
+cosmwasm-vm = { path = "../vm", default-features = false, features = [ "iterator" ] }
+cosmwasm-vm-wasmi = { path = "../vm-wasmi", default-features = false, features = [ "iterator" ] }
+wasmi = { git = "https://github.com/ComposableFi/wasmi", rev = "cd8c0c775a1d197a35ff3d5c7d6cded3d476411b", default-features = false }
+hex = { version = "0.4", default-features = false, features = [ "alloc" ]}
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+wasm-instrument = "0.2"
+wasm-bindgen = { version = "0.2", features = [ "serde-serialize" ] }
+js-sys = "0.3"
+serde-wasm-bindgen = "0.4.3"
