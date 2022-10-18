@@ -1,7 +1,11 @@
 use alloc::format;
 use serde::{de::DeserializeOwned, Serialize};
-use wasm_bindgen::{describe::WasmDescribe, convert::{FromWasmAbi, IntoWasmAbi}, JsValue, prelude::wasm_bindgen};
-
+use wasm_bindgen::{
+    convert::{FromWasmAbi, IntoWasmAbi},
+    describe::WasmDescribe,
+    prelude::wasm_bindgen,
+    JsValue,
+};
 
 #[cfg(target_pointer_width = "32")]
 pub type FatPtr = u64;
@@ -18,7 +22,7 @@ impl<T> From<T> for Marshall<T> {
 
 impl<T> WasmDescribe for Marshall<T> {
     fn describe() {
-        JsValue ::describe()
+        JsValue::describe()
     }
 }
 

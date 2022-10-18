@@ -1,6 +1,6 @@
 use crate::account::BankAccount;
 use crate::error::SimpleVMError;
-use crate::marshall::{Marshall, FatPtr};
+use crate::marshall::{FatPtr, Marshall};
 use crate::typescript::TypeScriptCosmWasmVM;
 use alloc::collections::BTreeMap;
 use alloc::format;

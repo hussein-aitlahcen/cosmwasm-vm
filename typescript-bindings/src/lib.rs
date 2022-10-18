@@ -3,8 +3,8 @@
 
 extern crate alloc;
 
-mod vm;
-mod typescript;
-mod error;
 mod account;
+mod error;
 mod marshall;
+mod typescript;
+mod vm;
