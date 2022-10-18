@@ -1047,7 +1047,7 @@ impl<S> From<SystemResult<S>> for Result<S, SystemError> {
 }
 
 #[cfg(feature = "iterator")]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 // We assign these to integers to provide a stable API for passing over FFI (to wasm and Go)
 pub enum Order {
     Ascending = 1,

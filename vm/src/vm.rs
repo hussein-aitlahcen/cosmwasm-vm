@@ -35,9 +35,10 @@ use cosmwasm_minimal_std::{
     Binary, Coin, ContractInfoResponse, CosmwasmQueryResult, Event, QueryResult, SystemResult,
 };
 
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// Gas checkpoint, used to meter sub-call gas usage.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum VmGasCheckpoint {
     /// Unlimited gas in a sub-call, the sub-call might exhaust the parent gas.
     Unlimited,
@@ -46,7 +47,7 @@ pub enum VmGasCheckpoint {
 }
 
 /// Gasable VM calls.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum VmGas {
     /// Instrumentation gas raised by the injected code.
     Instrumentation { metered: u32 },
@@ -251,6 +252,7 @@ pub trait VMBase {
 
     /// Burn the `funds` from the current contract.
     fn burn(&mut self, funds: &[Coin]) -> Result<(), Self::Error>;
+
     /// Query the balance of `denom` tokens.
     fn balance(&mut self, account: &Self::Address, denom: String) -> Result<Coin, Self::Error>;
 
