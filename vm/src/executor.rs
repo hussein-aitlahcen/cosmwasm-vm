@@ -50,9 +50,7 @@ impl<Pointer> Input for AllocateInput<Pointer> {
     type Output = Pointer;
 }
 impl<Pointer> AsFunctionName for AllocateInput<Pointer> {
-    fn name() -> &'static str {
-        "allocate"
-    }
+    const NAME: &'static str = "allocate";
 }
 
 pub struct Unit;
@@ -63,20 +61,19 @@ impl<Pointer> Input for DeallocateInput<Pointer> {
     type Output = Unit;
 }
 impl<Pointer> AsFunctionName for DeallocateInput<Pointer> {
-    fn name() -> &'static str {
-        "deallocate"
-    }
+    const NAME: &'static str = "deallocate";
 }
 
 /// The type representing a call to a contract `query` export.
-pub struct CosmwasmQueryInput<'a, Pointer>(pub Tagged<Pointer, Env>, pub Tagged<Pointer, &'a [u8]>);
-impl<'a, Pointer> Input for CosmwasmQueryInput<'a, Pointer> {
-    type Output = Pointer;
+pub struct QueryInput;
+impl Input for QueryInput {
+    type Output = QueryResult;
 }
-impl<'a, Pointer> AsFunctionName for CosmwasmQueryInput<'a, Pointer> {
-    fn name() -> &'static str {
-        "query"
-    }
+impl AsFunctionName for QueryInput {
+    const NAME: &'static str = "query";
+}
+impl HasInfo for QueryInput {
+    const HAS_INFO: bool = false;
 }
 
 /// The type representing a call to a contract `instantiate` export.
@@ -85,14 +82,10 @@ impl<T> Input for InstantiateInput<T> {
     type Output = InstantiateResult<T>;
 }
 impl<T> AsFunctionName for InstantiateInput<T> {
-    fn name() -> &'static str {
-        "instantiate"
-    }
+    const NAME: &'static str = "instantiate";
 }
 impl<T> HasInfo for InstantiateInput<T> {
-    fn has_info() -> bool {
-        true
-    }
+    const HAS_INFO: bool = true;
 }
 
 /// The type representing a call to a contract `execute` export.
@@ -101,14 +94,10 @@ impl<T> Input for ExecuteInput<T> {
     type Output = ExecuteResult<T>;
 }
 impl<T> AsFunctionName for ExecuteInput<T> {
-    fn name() -> &'static str {
-        "execute"
-    }
+    const NAME: &'static str = "execute";
 }
 impl<T> HasInfo for ExecuteInput<T> {
-    fn has_info() -> bool {
-        true
-    }
+    const HAS_INFO: bool = true;
 }
 
 /// The type representing a call to a contract `reply` export.
@@ -117,14 +106,10 @@ impl<T> Input for ReplyInput<T> {
     type Output = ReplyResult<T>;
 }
 impl<T> AsFunctionName for ReplyInput<T> {
-    fn name() -> &'static str {
-        "reply"
-    }
+    const NAME: &'static str = "reply";
 }
 impl<T> HasInfo for ReplyInput<T> {
-    fn has_info() -> bool {
-        false
-    }
+    const HAS_INFO: bool = false;
 }
 
 /// The type representing a call to a contract `migrate` export.
@@ -133,18 +118,14 @@ impl<T> Input for MigrateInput<T> {
     type Output = MigrateResult<T>;
 }
 impl<T> AsFunctionName for MigrateInput<T> {
-    fn name() -> &'static str {
-        "migrate"
-    }
+    const NAME: &'static str = "migrate";
 }
 impl<T> HasInfo for MigrateInput<T> {
-    fn has_info() -> bool {
-        false
-    }
+    const HAS_INFO: bool = false;
 }
 
 pub trait AsFunctionName {
-    fn name() -> &'static str;
+    const NAME: &'static str;
 }
 
 /// Structure that hold the function inputs for `f(env, messageInfo, msg) -> X`.
@@ -170,7 +151,7 @@ impl<'a, Pointer, I: Input> Input for CosmwasmCallWithoutInfoInput<'a, Pointer, 
 
 /// Whether an input type require the `MessageInfo` message to be passed.
 pub trait HasInfo {
-    fn has_info() -> bool;
+    const HAS_INFO: bool;
 }
 
 /// Errors likely to happen while doing low level executor calls.
@@ -186,6 +167,8 @@ pub enum ExecutorError {
     DeallocationWouldOverflow,
     /// The read limit is too big and could not be converted to a pointer.
     CallReadLimitWouldOverflow,
+    /// Pointer is invalid
+    InvalidPointer,
 }
 
 pub mod constants {
@@ -219,6 +202,14 @@ pub mod constants {
     pub const MAX_LENGTH_DEBUG: usize = 2 * MI;
     /// Max length for an abort message
     pub const MAX_LENGTH_ABORT: usize = 2 * MI;
+    /// Max length of a message hash
+    pub const MAX_LENGTH_MESSAGE_HASH: usize = 32;
+    /// Length of an edcsa signature
+    pub const EDCSA_SIGNATURE_LENGTH: usize = 64;
+    /// Max length for edcsa public key
+    pub const MAX_LENGTH_EDCSA_PUBKEY_LENGTH: usize = 65;
+    /// Length of an eddsa public key
+    pub const EDDSA_PUBKEY_LENGTH: usize = 32;
 }
 
 /// Allow for untyped marshalling to specify a limit while extracting the bytes from a contract memory.
@@ -271,6 +262,22 @@ where
     Ok(())
 }
 
+pub fn passthrough_in_to<V>(
+    vm: &mut V,
+    destination: V::Pointer,
+    data: &[u8],
+) -> Result<(), VmErrorOf<V>>
+where
+    V: VM + ReadWriteMemory,
+    for<'x> VmInputOf<'x, V>: TryFrom<AllocateInput<V::Pointer>, Error = VmErrorOf<V>>,
+    V::Pointer: for<'x> TryFrom<VmOutputOf<'x, V>, Error = VmErrorOf<V>>,
+    VmErrorOf<V>:
+        From<ReadableMemoryErrorOf<V>> + From<WritableMemoryErrorOf<V>> + From<ExecutorError>,
+{
+    RawIntoRegion::try_from(Write(vm, destination, data))?;
+    Ok(())
+}
+
 /// Allocate memory in the contract and write raw bytes representing some value of type `T`.
 ///
 /// # Arguments
@@ -289,7 +296,7 @@ where
 {
     log::trace!("PassthroughIn");
     let pointer = allocate::<_, _, usize>(vm, data.len())?;
-    RawIntoRegion::try_from(Write(vm, pointer, data))?;
+    passthrough_in_to(vm, pointer, data)?;
     Ok(Tagged::new(pointer))
 }
 
@@ -338,7 +345,7 @@ where
 {
     log::trace!("MarshallIn");
     let serialized = serde_json::to_vec(x).map_err(|_| ExecutorError::FailedToSerialize)?;
-    Ok(passthrough_in(vm, &serialized)?)
+    passthrough_in(vm, &serialized)
 }
 
 /// Read a JSON serialized value of type `T` from a region identified by the `pointer`.
@@ -390,52 +397,26 @@ where
     VmErrorOf<V>:
         From<ReadableMemoryErrorOf<V>> + From<WritableMemoryErrorOf<V>> + From<ExecutorError>,
 {
-    log::trace!("Call");
+    log::trace!("Call {}", alloc::string::String::from_utf8_lossy(message));
     let env = vm.get();
-    let pointer = match I::has_info() {
-        true => {
-            let info = vm.get();
-            let input = CosmwasmCallInput(
-                marshall_in(vm, &env)?,
-                marshall_in(vm, &info)?,
-                passthrough_in(vm, message)?,
-                PhantomData,
-            );
-            vm.call(input)
-        }
-        false => {
-            let input = CosmwasmCallWithoutInfoInput(
-                marshall_in(vm, &env)?,
-                passthrough_in(vm, message)?,
-                PhantomData,
-            );
-            vm.call(input)
-        }
+    let pointer = if I::HAS_INFO {
+        let info = vm.get();
+        let input = CosmwasmCallInput(
+            marshall_in(vm, &env)?,
+            marshall_in(vm, &info)?,
+            passthrough_in(vm, message)?,
+            PhantomData,
+        );
+        vm.call(input)
+    } else {
+        let input = CosmwasmCallWithoutInfoInput(
+            marshall_in(vm, &env)?,
+            passthrough_in(vm, message)?,
+            PhantomData,
+        );
+        vm.call(input)
     }?;
     let result = marshall_out(vm, pointer)?;
     deallocate(vm, pointer)?;
     Ok(result)
-}
-
-/// Execute a contract `query` function, providing the custom raw `message` input.
-///
-/// # Arguments
-///
-/// * `vm` - the virtual machine.
-/// * `message` - the contract message passed to the export, usually specific to the contract (InstantiateMsg, ExecuteMsg etc...).
-///
-/// Returns either a `QueryResult` or a `VmErrorOf<V>`.
-pub fn cosmwasm_query<V>(vm: &mut V, message: &[u8]) -> Result<QueryResult, VmErrorOf<V>>
-where
-    V: VM + ReadWriteMemory + Has<Env>,
-    V::Pointer: for<'x> TryFrom<VmOutputOf<'x, V>, Error = VmErrorOf<V>>,
-    for<'x> VmInputOf<'x, V>: TryFrom<AllocateInput<V::Pointer>, Error = VmErrorOf<V>>
-        + TryFrom<CosmwasmQueryInput<'x, V::Pointer>, Error = VmErrorOf<V>>,
-    VmErrorOf<V>: From<ReadableMemoryErrorOf<V>> + From<ExecutorError>,
-{
-    log::trace!("Query");
-    let env = vm.get();
-    let input = CosmwasmQueryInput(marshall_in(vm, &env)?, passthrough_in(vm, message)?);
-    let pointer = vm.call(input)?;
-    marshall_out(vm, pointer)
 }

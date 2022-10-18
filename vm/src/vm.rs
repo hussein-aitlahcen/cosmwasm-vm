@@ -29,9 +29,12 @@
 use crate::input::Input;
 use alloc::{string::String, vec::Vec};
 use core::fmt::Debug;
+#[cfg(feature = "iterator")]
+use cosmwasm_minimal_std::Order;
 use cosmwasm_minimal_std::{
     Binary, Coin, ContractInfoResponse, CosmwasmQueryResult, Event, QueryResult, SystemResult,
 };
+
 use serde::de::DeserializeOwned;
 
 /// Gas checkpoint, used to meter sub-call gas usage.
@@ -47,20 +50,16 @@ pub enum VmGasCheckpoint {
 pub enum VmGas {
     /// Instrumentation gas raised by the injected code.
     Instrumentation { metered: u32 },
-    /// Cost of calling `raw_call`.
-    RawCall,
-    /// Cost of `new_contract`.
-    NewContract,
-    /// Cost of `set_code_id`.
-    SetCodeId,
-    /// Cost of `code_id`.
-    GetCodeId,
+    /// Cost of `set_contract_meta`.
+    SetContractMeta,
+    /// Cost of `contract_meta`.
+    GetContractMeta,
     /// Cost of `query_continuation`.
     QueryContinuation,
     /// Cost of `continue_execute`.
-    ContinueExecute,
+    ContinueExecute { nb_of_coins: u32 },
     /// Cost of `continue_instantiate`.
-    ContinueInstantiate,
+    ContinueInstantiate { nb_of_coins: u32 },
     /// Cost of `continue_migrate`.
     ContinueMigrate,
     /// Cost of `query_custom`.
@@ -70,7 +69,7 @@ pub enum VmGas {
     /// Cost of `query_raw`.
     QueryRaw,
     /// Cost of `transfer`.
-    Transfer,
+    Transfer { nb_of_coins: u32 },
     /// Cost of `burn`.
     Burn,
     /// Cost of `balance`.
@@ -79,14 +78,34 @@ pub enum VmGas {
     AllBalance,
     /// Cost of `query_info`.
     QueryInfo,
-    /// Cost of `query_chain`.
-    QueryChain,
     /// Cost of `db_read`.
     DbRead,
     /// Cost of `db_write`.
     DbWrite,
     /// Cost of `db_remove`.
     DbRemove,
+    #[cfg(feature = "iterator")]
+    /// Cost of `db_scan`.
+    DbScan,
+    #[cfg(feature = "iterator")]
+    /// Cost of `db_next`.
+    DbNext,
+    /// Cost of `debug`
+    Debug,
+    /// Cost of `secp256k1_verify`
+    Secp256k1Verify,
+    /// Cost of `secp256k1_recover_pubkey`
+    Secp256k1RecoverPubkey,
+    /// Cost of `ed25519_verify`
+    Ed25519Verify,
+    /// Cost of `ed25519_batch_verify`
+    Ed25519BatchVerify,
+    /// Cost of `addr_validate`
+    AddrValidate,
+    /// Cost of `addr_canonicalize`
+    AddrCanonicalize,
+    /// Cost of `addr_humanize`
+    AddrHumanize,
 }
 
 pub type VmInputOf<'a, T> = <T as VMBase>::Input<'a>;
@@ -95,9 +114,10 @@ pub type VmErrorOf<T> = <T as VMBase>::Error;
 pub type VmQueryCustomOf<T> = <T as VMBase>::QueryCustom;
 pub type VmMessageCustomOf<T> = <T as VMBase>::MessageCustom;
 pub type VmAddressOf<T> = <T as VMBase>::Address;
+pub type VmCanonicalAddressOf<T> = <T as VMBase>::CanonicalAddress;
 pub type VmStorageKeyOf<T> = <T as VMBase>::StorageKey;
 pub type VmStorageValueOf<T> = <T as VMBase>::StorageValue;
-pub type VmCodeIdOf<T> = <T as VMBase>::CodeId;
+pub type VmContracMetaOf<T> = <T as VMBase>::ContractMeta;
 
 /// A way of calling a VM. From the abstract `call` to `raw_call`.
 pub trait VM: VMBase {
@@ -108,7 +128,7 @@ pub trait VM: VMBase {
         I::Output: for<'x> TryFrom<VmOutputOf<'x, Self>, Error = Self::Error>,
     {
         let input = input.try_into()?;
-        Ok(self.raw_call::<I::Output>(input)?)
+        self.raw_call::<I::Output>(input)
     }
 
     /// Execute a raw call against the VM.
@@ -127,10 +147,12 @@ pub trait VMBase {
     type QueryCustom: DeserializeOwned + Debug;
     /// Custom message, also known as chain extension.
     type MessageCustom: DeserializeOwned + Debug;
-    /// Unique identifier of a wasm blob representing a contract code.
-    type CodeId;
+    /// Metadata of a contract.
+    type ContractMeta;
     /// Unique identifier for contract instances and users under the system.
     type Address;
+    /// Binary representation of `Address`.
+    type CanonicalAddress;
     /// Type of key used by the underlying DB.
     type StorageKey;
     /// Type of value used by the underlying DB.
@@ -138,18 +160,35 @@ pub trait VMBase {
     /// Possible errors raised by this VM.
     type Error;
 
-    /// Create a new contract from the given code id.
-    fn new_contract(&mut self, code_id: Self::CodeId) -> Result<Self::Address, Self::Error>;
+    // Get the contract metadata of the currently running contract.
+    fn running_contract_meta(&mut self) -> Result<Self::ContractMeta, Self::Error>;
 
-    /// Change the code id of a contract, actually migrating it.
-    fn set_code_id(
+    #[cfg(feature = "iterator")]
+    /// Allows iteration over a set of key/value pairs, either forwards or backwards.
+    /// Returns an iterator ID that is unique within the Storage instance.
+    fn db_scan(
+        &mut self,
+        start: Option<Self::StorageKey>,
+        end: Option<Self::StorageKey>,
+        order: Order,
+    ) -> Result<u32, Self::Error>;
+
+    #[cfg(feature = "iterator")]
+    /// Returns the next element of the iterator with the given ID.
+    fn db_next(
+        &mut self,
+        iterator_id: u32,
+    ) -> Result<(Self::StorageKey, Self::StorageValue), Self::Error>;
+
+    /// Change the contract meta of a contract, actually migrating it.
+    fn set_contract_meta(
         &mut self,
         address: Self::Address,
-        new_code_id: Self::CodeId,
+        new_contract_meta: Self::ContractMeta,
     ) -> Result<(), Self::Error>;
 
-    /// Get the code id of a given contract.
-    fn code_id(&mut self, address: Self::Address) -> Result<Self::CodeId, Self::Error>;
+    /// Get the contract metadata of a given contract.
+    fn contract_meta(&mut self, address: Self::Address) -> Result<Self::ContractMeta, Self::Error>;
 
     /// Continue execution by calling query at the given contract address.
     fn query_continuation(
@@ -159,6 +198,7 @@ pub trait VMBase {
     ) -> Result<QueryResult, Self::Error>;
 
     /// Continue execution by calling execute at the given contract address.
+    /// Implementor must ensure that the funds are moved before executing the contract.
     fn continue_execute(
         &mut self,
         address: Self::Address,
@@ -167,20 +207,21 @@ pub trait VMBase {
         event_handler: &mut dyn FnMut(Event),
     ) -> Result<Option<Binary>, Self::Error>;
 
-    /// Continue execution by calling instantiate at the given contract address.
+    /// Continue execution by instantiating the given contract code_id.
+    /// Implementor must ensure that the funds are moved before executing the contract.
     fn continue_instantiate(
         &mut self,
-        address: Self::Address,
+        contract_meta: Self::ContractMeta,
         funds: Vec<Coin>,
         message: &[u8],
         event_handler: &mut dyn FnMut(Event),
-    ) -> Result<Option<Binary>, Self::Error>;
+    ) -> Result<(Self::Address, Option<Binary>), Self::Error>;
 
     /// Continue execution by calling migrate at the given contract address.
+    /// Implementor must ensure that the funds are moved before executing the contract.
     fn continue_migrate(
         &mut self,
         address: Self::Address,
-        funds: Vec<Coin>,
         message: &[u8],
         event_handler: &mut dyn FnMut(Event),
     ) -> Result<Option<Binary>, Self::Error>;
@@ -210,7 +251,6 @@ pub trait VMBase {
 
     /// Burn the `funds` from the current contract.
     fn burn(&mut self, funds: &[Coin]) -> Result<(), Self::Error>;
-
     /// Query the balance of `denom` tokens.
     fn balance(&mut self, account: &Self::Address, denom: String) -> Result<Coin, Self::Error>;
 
@@ -219,6 +259,9 @@ pub trait VMBase {
 
     /// Query the contract info.
     fn query_info(&mut self, address: Self::Address) -> Result<ContractInfoResponse, Self::Error>;
+
+    /// Log the message
+    fn debug(&mut self, message: Vec<u8>) -> Result<(), Self::Error>;
 
     /// Read an entry from the current contract db.
     fn db_read(&mut self, key: Self::StorageKey)
@@ -234,6 +277,26 @@ pub trait VMBase {
     /// Remove an entry from the current contract db.
     fn db_remove(&mut self, key: Self::StorageKey) -> Result<(), Self::Error>;
 
+    /// Validates a human readable address.
+    /// NOTE: The return type is `Result<Result<(), Self::Error>, Self::Error>` but not
+    /// `Result<(), Self::Error>`, this is because errors that are related to address
+    /// validation are treated differently in wasmi vm. Any errors that are related to
+    /// address validation should be returned in the inner result like `Ok(Err(..))`.
+    fn addr_validate(&mut self, input: &str) -> Result<Result<(), Self::Error>, Self::Error>;
+
+    /// Returns a canonical address from a human readable address.
+    /// see: [`Self::addr_validate`]
+    fn addr_canonicalize(
+        &mut self,
+        input: &str,
+    ) -> Result<Result<Self::CanonicalAddress, Self::Error>, Self::Error>;
+
+    /// Returns a human readable address from a canonical address.
+    fn addr_humanize(
+        &mut self,
+        addr: &Self::CanonicalAddress,
+    ) -> Result<Result<Self::Address, Self::Error>, Self::Error>;
+
     /// Abort execution, called when the contract panic.
     fn abort(&mut self, message: String) -> Result<(), Self::Error>;
 
@@ -248,4 +311,42 @@ pub trait VMBase {
 
     /// Ensure that some gas is available.
     fn gas_ensure_available(&mut self) -> Result<(), Self::Error>;
+
+    /// Verifies `message_hash` against a `signature` with a `public_key`, using the
+    /// secp256k1 ECDSA parametrization.
+    fn secp256k1_verify(
+        &mut self,
+        message_hash: &[u8],
+        signature: &[u8],
+        public_key: &[u8],
+    ) -> Result<bool, Self::Error>;
+
+    /// Recovers a public key from a message hash and a signature.
+    ///
+    /// Returns the recovered pubkey in compressed form, which can be used
+    /// in secp256k1_verify directly. Any errors related to recovering the
+    /// public key should result in `Ok(Err(()))`
+    fn secp256k1_recover_pubkey(
+        &mut self,
+        message_hash: &[u8],
+        signature: &[u8],
+        recovery_param: u8,
+    ) -> Result<Result<Vec<u8>, ()>, Self::Error>;
+
+    /// Verify `message` against a `signature`, with the `public_key` of the signer, using
+    /// the ed25519 elliptic curve digital signature parametrization / algorithm.
+    fn ed25519_verify(
+        &mut self,
+        message: &[u8],
+        signature: &[u8],
+        public_key: &[u8],
+    ) -> Result<bool, Self::Error>;
+
+    /// Performs batch Ed25519 signature verification.
+    fn ed25519_batch_verify(
+        &mut self,
+        messages: &[&[u8]],
+        signatures: &[&[u8]],
+        public_keys: &[&[u8]],
+    ) -> Result<bool, Self::Error>;
 }

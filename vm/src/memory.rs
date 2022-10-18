@@ -140,7 +140,7 @@ where
     fn try_from(
         LimitedRead(memory, pointer, limit): LimitedRead<'a, M>,
     ) -> Result<Self, Self::Error> {
-        log::trace!("RawFromRegion");
+        log::trace!("RawFromRegion: {:?}", pointer);
         let FromMemory(region) = FromMemory::<Region<M::Pointer>>::try_from(Read(memory, pointer))?;
         if region.length > limit {
             Err(MemoryReadError::OverflowLimit.into())
@@ -208,7 +208,9 @@ where
         let len = M::Pointer::try_from(core::mem::size_of::<T>())
             .map_err(|_| MemoryWriteError::BufferSizeOverflowPointer)?;
         if region.capacity < len {
-            Err(<M as WritableMemory>::Error::from(MemoryWriteError::RegionTooSmall).into())
+            Err(<M as WritableMemory>::Error::from(
+                MemoryWriteError::RegionTooSmall,
+            ))
         } else {
             let _ = IntoMemory::try_from(TypedWrite(memory, region.offset, value))?;
             region.length = len;
@@ -233,7 +235,9 @@ where
         let len = M::Pointer::try_from(value.len())
             .map_err(|_| MemoryWriteError::BufferSizeOverflowPointer)?;
         if region.capacity < len {
-            Err(<M as WritableMemory>::Error::from(MemoryWriteError::RegionTooSmall).into())
+            Err(<M as WritableMemory>::Error::from(
+                MemoryWriteError::RegionTooSmall,
+            ))
         } else {
             let _ = RawIntoMemory::try_from(Write(memory, region.offset, value))?;
             region.length = len;
