@@ -38,11 +38,86 @@ use crate::{
 };
 use alloc::vec::Vec;
 use core::{fmt::Debug, marker::PhantomData};
-use cosmwasm_minimal_std::{
-    deserialization_limits, read_limits, Binary, ContractResult, Empty, Env, MessageInfo,
-    QueryRequest, Response,
-};
+use cosmwasm_std::{Binary, ContractResult, Empty, Env, MessageInfo, QueryRequest, Response};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+pub mod read_limits {
+    /// A mibi (mega binary)
+    const MI: usize = 1024 * 1024;
+    /// Max length (in bytes) of the result data from an instantiate call.
+    pub const RESULT_INSTANTIATE: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from an execute call.
+    pub const RESULT_EXECUTE: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a migrate call.
+    pub const RESULT_MIGRATE: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a sudo call.
+    pub const RESULT_SUDO: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a reply call.
+    pub const RESULT_REPLY: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a query call.
+    pub const RESULT_QUERY: usize = 64 * MI;
+    /// Max length (in bytes) of the query data from a query_chain call.
+    pub const REQUEST_QUERY: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a ibc_channel_open call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_CHANNEL_OPEN: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a ibc_channel_connect call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_CHANNEL_CONNECT: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a ibc_channel_close call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_CHANNEL_CLOSE: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a ibc_packet_receive call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_PACKET_RECEIVE: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a ibc_packet_ack call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_PACKET_ACK: usize = 64 * MI;
+    /// Max length (in bytes) of the result data from a ibc_packet_timeout call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_PACKET_TIMEOUT: usize = 64 * MI;
+}
+
+/// The limits for the JSON deserialization.
+///
+/// Those limits are not used when the Rust JSON deserializer is bypassed by using the
+/// public `call_*_raw` functions directly.
+pub mod deserialization_limits {
+    /// A kibi (kilo binary)
+    const KI: usize = 1024;
+    /// Max length (in bytes) of the result data from an instantiate call.
+    pub const RESULT_INSTANTIATE: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from an execute call.
+    pub const RESULT_EXECUTE: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a migrate call.
+    pub const RESULT_MIGRATE: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a sudo call.
+    pub const RESULT_SUDO: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a reply call.
+    pub const RESULT_REPLY: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a query call.
+    pub const RESULT_QUERY: usize = 256 * KI;
+    /// Max length (in bytes) of the query data from a query_chain call.
+    pub const REQUEST_QUERY: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a ibc_channel_open call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_CHANNEL_OPEN: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a ibc_channel_connect call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_CHANNEL_CONNECT: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a ibc_channel_close call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_CHANNEL_CLOSE: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a ibc_packet_receive call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_PACKET_RECEIVE: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a ibc_packet_ack call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_PACKET_ACK: usize = 256 * KI;
+    /// Max length (in bytes) of the result data from a ibc_packet_timeout call.
+    #[cfg(feature = "stargate")]
+    pub const RESULT_IBC_PACKET_TIMEOUT: usize = 256 * KI;
+}
 
 pub type CosmwasmExecutionResult<T> = ContractResult<Response<T>>;
 pub type CosmwasmQueryResult = ContractResult<QueryResponse>;
@@ -160,9 +235,7 @@ pub mod ibc {
     #![cfg(feature = "stargate")]
 
     use super::*;
-    use cosmwasm_minimal_std::ibc::{
-        Ibc3ChannelOpenResponse, IbcBasicResponse, IbcReceiveResponse,
-    };
+    use cosmwasm_std::{Ibc3ChannelOpenResponse, IbcBasicResponse, IbcReceiveResponse};
 
     /// Response to the low level `ibc_channel_open` call.
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -193,18 +266,20 @@ pub mod ibc {
     }
     impl<T> From<IbcChannelConnectResult<T>> for ContractResult<Response<T>> {
         fn from(IbcChannelConnectResult(result): IbcChannelConnectResult<T>) -> Self {
-            result.map(
-                |IbcBasicResponse {
-                     messages,
-                     attributes,
-                     events,
-                 }| Response {
+            match result {
+                ContractResult::Ok(IbcBasicResponse {
                     messages,
                     attributes,
                     events,
-                    data: None,
-                },
-            )
+                    ..
+                }) => ContractResult::Ok(
+                    Response::new()
+                        .add_submessages(messages)
+                        .add_attributes(attributes)
+                        .add_events(events),
+                ),
+                ContractResult::Err(x) => ContractResult::Err(x),
+            }
         }
     }
 
@@ -223,18 +298,20 @@ pub mod ibc {
     }
     impl<T> From<IbcChannelCloseResult<T>> for ContractResult<Response<T>> {
         fn from(IbcChannelCloseResult(result): IbcChannelCloseResult<T>) -> Self {
-            result.map(
-                |IbcBasicResponse {
-                     messages,
-                     attributes,
-                     events,
-                 }| Response {
+            match result {
+                ContractResult::Ok(IbcBasicResponse {
                     messages,
                     attributes,
                     events,
-                    data: None,
-                },
-            )
+                    ..
+                }) => ContractResult::Ok(
+                    Response::new()
+                        .add_submessages(messages)
+                        .add_attributes(attributes)
+                        .add_events(events),
+                ),
+                ContractResult::Err(x) => ContractResult::Err(x),
+            }
         }
     }
 
@@ -253,19 +330,22 @@ pub mod ibc {
     }
     impl<T> From<IbcPacketReceiveResult<T>> for ContractResult<Response<T>> {
         fn from(IbcPacketReceiveResult(result): IbcPacketReceiveResult<T>) -> Self {
-            result.map(
-                |IbcReceiveResponse {
-                     acknowledgement,
-                     messages,
-                     attributes,
-                     events,
-                 }| Response {
+            match result {
+                ContractResult::Ok(IbcReceiveResponse {
                     messages,
                     attributes,
                     events,
-                    data: Some(acknowledgement),
-                },
-            )
+                    acknowledgement,
+                    ..
+                }) => ContractResult::Ok(
+                    Response::new()
+                        .add_submessages(messages)
+                        .add_attributes(attributes)
+                        .add_events(events)
+                        .set_data(acknowledgement),
+                ),
+                ContractResult::Err(x) => ContractResult::Err(x),
+            }
         }
     }
 
@@ -284,18 +364,20 @@ pub mod ibc {
     }
     impl<T> From<IbcPacketAckResult<T>> for ContractResult<Response<T>> {
         fn from(IbcPacketAckResult(result): IbcPacketAckResult<T>) -> Self {
-            result.map(
-                |IbcBasicResponse {
-                     messages,
-                     attributes,
-                     events,
-                 }| Response {
+            match result {
+                ContractResult::Ok(IbcBasicResponse {
                     messages,
                     attributes,
                     events,
-                    data: None,
-                },
-            )
+                    ..
+                }) => ContractResult::Ok(
+                    Response::new()
+                        .add_submessages(messages)
+                        .add_attributes(attributes)
+                        .add_events(events),
+                ),
+                ContractResult::Err(x) => ContractResult::Err(x),
+            }
         }
     }
 
@@ -314,90 +396,92 @@ pub mod ibc {
     }
     impl<T> From<IbcPacketTimeoutResult<T>> for ContractResult<Response<T>> {
         fn from(IbcPacketTimeoutResult(result): IbcPacketTimeoutResult<T>) -> Self {
-            result.map(
-                |IbcBasicResponse {
-                     messages,
-                     attributes,
-                     events,
-                 }| Response {
+            match result {
+                ContractResult::Ok(IbcBasicResponse {
                     messages,
                     attributes,
                     events,
-                    data: None,
-                },
-            )
+                    ..
+                }) => ContractResult::Ok(
+                    Response::new()
+                        .add_submessages(messages)
+                        .add_attributes(attributes)
+                        .add_events(events),
+                ),
+                ContractResult::Err(x) => ContractResult::Err(x),
+            }
         }
     }
 
     /// Strong type representing a call to `ibc_channel_open` export.
-    pub struct IbcChannelOpen;
-    impl Input for IbcChannelOpen {
+    pub struct IbcChannelOpenInput;
+    impl Input for IbcChannelOpenInput {
         type Output = IbcChannelOpenResult;
     }
-    impl AsFunctionName for IbcChannelOpen {
+    impl AsFunctionName for IbcChannelOpenInput {
         const NAME: &'static str = "ibc_channel_open";
     }
-    impl HasInfo for IbcChannelOpen {
+    impl HasInfo for IbcChannelOpenInput {
         const HAS_INFO: bool = false;
     }
 
     /// Strong type representing a call to `ibc_channel_connect` export.
-    pub struct IbcChannelConnect<T = Empty>(PhantomData<T>);
-    impl<T> Input for IbcChannelConnect<T> {
+    pub struct IbcChannelConnectInput<T = Empty>(PhantomData<T>);
+    impl<T> Input for IbcChannelConnectInput<T> {
         type Output = IbcChannelConnectResult<T>;
     }
-    impl<T> AsFunctionName for IbcChannelConnect<T> {
+    impl<T> AsFunctionName for IbcChannelConnectInput<T> {
         const NAME: &'static str = "ibc_channel_connect";
     }
-    impl<T> HasInfo for IbcChannelConnect<T> {
+    impl<T> HasInfo for IbcChannelConnectInput<T> {
         const HAS_INFO: bool = false;
     }
 
     /// Strong type representing a call to `ibc_channel_close` export.
-    pub struct IbcChannelClose<T = Empty>(PhantomData<T>);
-    impl<T> Input for IbcChannelClose<T> {
+    pub struct IbcChannelCloseInput<T = Empty>(PhantomData<T>);
+    impl<T> Input for IbcChannelCloseInput<T> {
         type Output = IbcChannelCloseResult<T>;
     }
-    impl<T> AsFunctionName for IbcChannelClose<T> {
+    impl<T> AsFunctionName for IbcChannelCloseInput<T> {
         const NAME: &'static str = "ibc_channel_close";
     }
-    impl<T> HasInfo for IbcChannelClose<T> {
+    impl<T> HasInfo for IbcChannelCloseInput<T> {
         const HAS_INFO: bool = false;
     }
 
     /// Strong type representing a call to `ibc_packet_receive` export.
-    pub struct IbcPacketReceive<T = Empty>(PhantomData<T>);
-    impl<T> Input for IbcPacketReceive<T> {
+    pub struct IbcPacketReceiveInput<T = Empty>(PhantomData<T>);
+    impl<T> Input for IbcPacketReceiveInput<T> {
         type Output = IbcPacketReceiveResult<T>;
     }
-    impl<T> AsFunctionName for IbcPacketReceive<T> {
+    impl<T> AsFunctionName for IbcPacketReceiveInput<T> {
         const NAME: &'static str = "ibc_packet_receive";
     }
-    impl<T> HasInfo for IbcPacketReceive<T> {
+    impl<T> HasInfo for IbcPacketReceiveInput<T> {
         const HAS_INFO: bool = false;
     }
 
     /// Strong type representing a call to `ibc_packet_ack` export.
-    pub struct IbcPacketAck<T = Empty>(PhantomData<T>);
-    impl<T> Input for IbcPacketAck<T> {
+    pub struct IbcPacketAckInput<T = Empty>(PhantomData<T>);
+    impl<T> Input for IbcPacketAckInput<T> {
         type Output = IbcPacketAckResult<T>;
     }
-    impl<T> AsFunctionName for IbcPacketAck<T> {
+    impl<T> AsFunctionName for IbcPacketAckInput<T> {
         const NAME: &'static str = "ibc_packet_ack";
     }
-    impl<T> HasInfo for IbcPacketAck<T> {
+    impl<T> HasInfo for IbcPacketAckInput<T> {
         const HAS_INFO: bool = false;
     }
 
     /// Strong type representing a call to `ibc_packet_timeout` export.
-    pub struct IbcPacketTimeout<T = Empty>(PhantomData<T>);
-    impl<T> Input for IbcPacketTimeout<T> {
+    pub struct IbcPacketTimeoutInput<T = Empty>(PhantomData<T>);
+    impl<T> Input for IbcPacketTimeoutInput<T> {
         type Output = IbcPacketTimeoutResult<T>;
     }
-    impl<T> AsFunctionName for IbcPacketTimeout<T> {
+    impl<T> AsFunctionName for IbcPacketTimeoutInput<T> {
         const NAME: &'static str = "ibc_packet_timeout";
     }
-    impl<T> HasInfo for IbcPacketTimeout<T> {
+    impl<T> HasInfo for IbcPacketTimeoutInput<T> {
         const HAS_INFO: bool = false;
     }
 }

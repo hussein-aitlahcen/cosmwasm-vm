@@ -28,8 +28,11 @@
 
 #[cfg(feature = "stargate")]
 use crate::executor::ibc::{
-    IbcChannelClose, IbcChannelConnect, IbcPacketAck, IbcPacketReceive, IbcPacketTimeout,
+    IbcChannelCloseInput, IbcChannelConnectInput, IbcPacketAckInput, IbcPacketReceiveInput,
+    IbcPacketTimeoutInput,
 };
+#[cfg(feature = "stargate")]
+use crate::executor::AsFunctionName;
 use crate::{
     executor::{
         cosmwasm_call, AllocateInput, CosmwasmCallInput, CosmwasmCallWithoutInfoInput,
@@ -47,13 +50,13 @@ use crate::{
 };
 use alloc::{fmt::Display, format, string::String, vec, vec::Vec};
 use core::fmt::Debug;
-#[cfg(feature = "stargate")]
-use cosmwasm_minimal_std::ibc::IbcMsg;
-use cosmwasm_minimal_std::{
+use cosmwasm_std::{
     Addr, AllBalanceResponse, Attribute, BalanceResponse, BankMsg, BankQuery, Binary,
     ContractResult, CosmosMsg, Env, Event, MessageInfo, QueryRequest, Reply, ReplyOn, Response,
     SubMsg, SubMsgResponse, SubMsgResult, SystemResult, WasmMsg, WasmQuery,
 };
+#[cfg(feature = "stargate")]
+use cosmwasm_std::{Empty, IbcMsg};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -135,15 +138,15 @@ impl Display for SystemEventType {
             SystemEventType::Sudo => "sudo",
             SystemEventType::Reply => "reply",
             #[cfg(feature = "stargate")]
-            SystemEventType::IbcChannelConnect => "ibc_channel_connect",
+            SystemEventType::IbcChannelConnect => IbcChannelConnectInput::<Empty>::NAME,
             #[cfg(feature = "stargate")]
-            SystemEventType::IbcChannelClose => "ibc_channel_close",
+            SystemEventType::IbcChannelClose => IbcChannelCloseInput::<Empty>::NAME,
             #[cfg(feature = "stargate")]
-            SystemEventType::IbcPacketReceive => "ibc_packet_receive",
+            SystemEventType::IbcPacketReceive => IbcPacketReceiveInput::<Empty>::NAME,
             #[cfg(feature = "stargate")]
-            SystemEventType::IbcPacketAck => "ibc_packet_ack",
+            SystemEventType::IbcPacketAck => IbcPacketAckInput::<Empty>::NAME,
             #[cfg(feature = "stargate")]
-            SystemEventType::IbcPacketTimeout => "ibc_packet_timeout",
+            SystemEventType::IbcPacketTimeout => IbcPacketTimeoutInput::<Empty>::NAME,
         };
 
         write!(f, "{}", event_str)
@@ -152,9 +155,11 @@ impl Display for SystemEventType {
 
 impl From<SystemEvent> for Event {
     fn from(sys_event: SystemEvent) -> Self {
-        Event::new(
-            format!("{}", sys_event.ty),
-            sys_event.attributes.into_iter().map(Into::into).collect(),
+        Event::new(format!("{}", sys_event.ty)).add_attributes(
+            sys_event
+                .attributes
+                .into_iter()
+                .map(Into::<Attribute>::into),
         )
     }
 }
@@ -180,27 +185,27 @@ impl<T> EventHasCodeId for ReplyInput<T> {
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventHasCodeId for IbcChannelConnect<T> {
+impl<T> EventHasCodeId for IbcChannelConnectInput<T> {
     const HAS_CODE_ID: bool = false;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventHasCodeId for IbcChannelClose<T> {
+impl<T> EventHasCodeId for IbcChannelCloseInput<T> {
     const HAS_CODE_ID: bool = false;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventHasCodeId for IbcPacketReceive<T> {
+impl<T> EventHasCodeId for IbcPacketReceiveInput<T> {
     const HAS_CODE_ID: bool = false;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventHasCodeId for IbcPacketAck<T> {
+impl<T> EventHasCodeId for IbcPacketAckInput<T> {
     const HAS_CODE_ID: bool = false;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventHasCodeId for IbcPacketTimeout<T> {
+impl<T> EventHasCodeId for IbcPacketTimeoutInput<T> {
     const HAS_CODE_ID: bool = false;
 }
 
@@ -225,27 +230,27 @@ impl<T> EventIsTyped for ReplyInput<T> {
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventIsTyped for IbcChannelConnect<T> {
+impl<T> EventIsTyped for IbcChannelConnectInput<T> {
     const TYPE: SystemEventType = SystemEventType::IbcChannelConnect;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventIsTyped for IbcChannelClose<T> {
+impl<T> EventIsTyped for IbcChannelCloseInput<T> {
     const TYPE: SystemEventType = SystemEventType::IbcChannelClose;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventIsTyped for IbcPacketReceive<T> {
+impl<T> EventIsTyped for IbcPacketReceiveInput<T> {
     const TYPE: SystemEventType = SystemEventType::IbcPacketReceive;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventIsTyped for IbcPacketAck<T> {
+impl<T> EventIsTyped for IbcPacketAckInput<T> {
     const TYPE: SystemEventType = SystemEventType::IbcPacketAck;
 }
 
 #[cfg(feature = "stargate")]
-impl<T> EventIsTyped for IbcPacketTimeout<T> {
+impl<T> EventIsTyped for IbcPacketTimeoutInput<T> {
     const TYPE: SystemEventType = SystemEventType::IbcPacketTimeout;
 }
 
@@ -369,19 +374,19 @@ where
 pub trait StargateCosmwasmCallVM = CosmwasmBaseVM
 where
     for<'x> VmInputOf<'x, Self>: TryFrom<
-            CosmwasmCallInput<'x, PointerOf<Self>, IbcChannelConnect<VmMessageCustomOf<Self>>>,
+            CosmwasmCallInput<'x, PointerOf<Self>, IbcChannelConnectInput<VmMessageCustomOf<Self>>>,
             Error = VmErrorOf<Self>,
         > + TryFrom<
-            CosmwasmCallInput<'x, PointerOf<Self>, IbcChannelClose<VmMessageCustomOf<Self>>>,
+            CosmwasmCallInput<'x, PointerOf<Self>, IbcChannelCloseInput<VmMessageCustomOf<Self>>>,
             Error = VmErrorOf<Self>,
         > + TryFrom<
-            CosmwasmCallInput<'x, PointerOf<Self>, IbcPacketReceive<VmMessageCustomOf<Self>>>,
+            CosmwasmCallInput<'x, PointerOf<Self>, IbcPacketReceiveInput<VmMessageCustomOf<Self>>>,
             Error = VmErrorOf<Self>,
         > + TryFrom<
-            CosmwasmCallInput<'x, PointerOf<Self>, IbcPacketAck<VmMessageCustomOf<Self>>>,
+            CosmwasmCallInput<'x, PointerOf<Self>, IbcPacketAckInput<VmMessageCustomOf<Self>>>,
             Error = VmErrorOf<Self>,
         > + TryFrom<
-            CosmwasmCallInput<'x, PointerOf<Self>, IbcPacketTimeout<VmMessageCustomOf<Self>>>,
+            CosmwasmCallInput<'x, PointerOf<Self>, IbcPacketTimeoutInput<VmMessageCustomOf<Self>>>,
             Error = VmErrorOf<Self>,
         >;
 
@@ -538,7 +543,7 @@ where
                     &mut attributes,
                     env.contract.address.clone().into_string(),
                 )?;
-                event_handler(Event::new(WASM_MODULE_EVENT_TYPE.into(), attributes));
+                event_handler(Event::new(WASM_MODULE_EVENT_TYPE).add_attributes(attributes));
             }
 
             // https://github.com/CosmWasm/wasmd/blob/ac92fdcf37388cc8dc24535f301f64395f8fb3da/x/wasm/keeper/events.go#L29
@@ -554,10 +559,10 @@ where
                     &mut attributes,
                     env.contract.address.clone().into_string(),
                 )?;
-                event_handler(Event::new(
-                    format!("{}{}", CUSTOM_CONTRACT_EVENT_PREFIX, ty),
-                    attributes,
-                ));
+                event_handler(
+                    Event::new(format!("{}{}", CUSTOM_CONTRACT_EVENT_PREFIX, ty))
+                        .add_attributes(attributes),
+                );
             }
 
             // Fold dispatch over the submessages. If an exception occur and we
@@ -673,6 +678,7 @@ where
                                 update_admin::<V>(vm, &info.sender, vm_contract_addr, None)
                                     .map(|_| None)
                             }
+                            _ => Err(SystemError::UnsupportedMessage.into()),
                         },
                         CosmosMsg::Bank(bank_message) => match bank_message {
                             BankMsg::Send { to_address, amount } => {
@@ -683,6 +689,7 @@ where
                                 vm.burn(&amount)?;
                                 Ok(None)
                             }
+                            _ => Err(SystemError::UnsupportedMessage.into()),
                         },
                         #[cfg(feature = "stargate")]
                         CosmosMsg::Ibc(ibc_message) => match ibc_message {
@@ -707,7 +714,15 @@ where
                                 vm.ibc_close_channel(channel_id)?;
                                 Ok(None)
                             }
+                            _ => Err(SystemError::UnsupportedMessage.into()),
                         },
+                        // TODO(hussein-aitlahcen): determine whether we handle.
+                        #[cfg(feature = "stargate")]
+                        CosmosMsg::Stargate { .. } => Err(SystemError::UnsupportedMessage.into()),
+                        // TODO(hussein-aitlahcen): determine whether we handle.
+                        #[cfg(feature = "stargate")]
+                        CosmosMsg::Gov(_) => Err(SystemError::UnsupportedMessage.into()),
+                        _ => Err(SystemError::UnsupportedMessage.into()),
                     };
 
                     log::debug!("Submessage result: {:?}", sub_res);
@@ -829,6 +844,7 @@ where
                     serialized_info,
                 ))))
             }
+            _ => Err(SystemError::UnsupportedMessage.into()),
         },
         QueryRequest::Wasm(wasm_query) => match wasm_query {
             WasmQuery::Smart {
@@ -858,7 +874,9 @@ where
                     serialized_info,
                 ))))
             }
+            _ => Err(SystemError::UnsupportedMessage.into()),
         },
+        _ => Err(SystemError::UnsupportedMessage.into()),
     }
 }
 
