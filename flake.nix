@@ -23,10 +23,10 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-      in
-      let
+      in let
         # Nightly rust used for wasm runtime compilation
-        rust-nightly = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rust-nightly =
+          pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
         # Crane lib instantiated with current nixpkgs
         crane-lib = crane.mkLib pkgs;
@@ -34,31 +34,28 @@
         # Crane pinned to nightly Rust
         crane-nightly = crane-lib.overrideToolchain rust-nightly;
 
-        # Default args to crane
-        common-args = {
-          pname = "cosmwasm-vm";
+        src = pkgs.lib.cleanSourceWith {
+          filter = pkgs.lib.cleanSourceFilter;
           src = pkgs.lib.cleanSourceWith {
-            filter = pkgs.lib.cleanSourceFilter;
-            src = pkgs.lib.cleanSourceWith {
-              filter = pkgs.nix-gitignore.gitignoreFilterPure (name: type: true)
-                [ ./.gitignore ] ./.;
-              src = ./.;
-            };
+            filter = pkgs.nix-gitignore.gitignoreFilterPure (name: type: true)
+              [ ./.gitignore ] ./.;
+            src = ./.;
           };
         };
+
+        # Default args to crane
+        common-args = { inherit src; };
 
         # Common dependencies used for caching
         common-deps = crane-nightly.buildDepsOnly common-args;
 
-        common-cached-args = common-args // {
-          cargoArtifacts = common-deps;
-        };
+        common-cached-args = common-args // { cargoArtifacts = common-deps; };
 
       in rec {
-        packages.cosmwasm-vm = crane-nightly.buildPackage (common-cached-args // {
-          cargoTestCommand = "cargo test";
-        });
-        packages.default = packages.cosmwasm-vm;
+        packages = rec {
+          cosmwasm-vm = crane-nightly.buildPackage common-cached-args;
+          default = cosmwasm-vm;
+        };
         checks = {
           package = packages.default;
           clippy = crane-nightly.cargoClippy (common-cached-args // {
@@ -66,8 +63,6 @@
           });
           fmt = crane-nightly.cargoFmt common-args;
         };
-        devShell = pkgs.mkShell {
-          buildInputs = [ rust-nightly ];
-        };
+        devShell = pkgs.mkShell { buildInputs = [ rust-nightly ]; };
       });
 }
