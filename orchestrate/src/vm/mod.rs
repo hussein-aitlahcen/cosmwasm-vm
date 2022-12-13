@@ -1,19 +1,21 @@
 mod account;
+mod address;
 mod bank;
 mod error;
 mod state;
 
 pub use account::*;
+pub use address::*;
 pub use error::*;
 pub use state::*;
 
 use super::ExecutionType;
-use alloc::{collections::BTreeMap, string::ToString};
+use alloc::collections::BTreeMap;
 use bank::Bank;
 use core::{fmt::Debug, num::NonZeroU32};
 use cosmwasm_std::{
-    Binary, Coin, ContractInfo, ContractInfoResponse, Empty, Env, Event, IbcTimeout, MessageInfo,
-    Order, Reply, SystemResult,
+    Binary, Coin, ContractInfo, ContractInfoResponse, Env, Event, IbcTimeout, MessageInfo, Order,
+    Reply, SystemResult,
 };
 use cosmwasm_vm::{
     executor::{
@@ -30,11 +32,8 @@ use cosmwasm_vm_wasmi::{
     host_functions, new_wasmi_vm, WasmiHostFunction, WasmiHostFunctionIndex, WasmiImportResolver,
     WasmiInput, WasmiModule, WasmiModuleExecutor, WasmiOutput, WasmiVM, WasmiVMError,
 };
+use serde::de::DeserializeOwned;
 use wasm_instrument::gas_metering::Rules;
-
-const CANONICAL_LENGTH: usize = 54;
-const SHUFFLES_ENCODE: usize = 18;
-const SHUFFLES_DECODE: usize = 2;
 
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
 pub struct Gas {
@@ -42,12 +41,14 @@ pub struct Gas {
 }
 
 impl Gas {
+    #[must_use]
     pub fn new(initial_value: u64) -> Self {
         Gas {
             checkpoints: vec![initial_value],
         }
     }
 
+    #[must_use]
     pub fn current(&self) -> &u64 {
         self.checkpoints.last().expect("impossible")
     }
@@ -56,7 +57,7 @@ impl Gas {
         self.checkpoints.last_mut().expect("impossible")
     }
 
-    pub fn push(&mut self, checkpoint: VmGasCheckpoint) -> Result<(), VmError> {
+    pub fn push(&mut self, checkpoint: &VmGasCheckpoint) -> Result<(), VmError> {
         match checkpoint {
             VmGasCheckpoint::Unlimited => {
                 let parent = self.current_mut();
@@ -65,12 +66,12 @@ impl Gas {
                 self.checkpoints.push(value);
                 Ok(())
             }
-            VmGasCheckpoint::Limited(limit) if limit <= *self.current() => {
+            VmGasCheckpoint::Limited(limit) if limit <= self.current() => {
                 *self.current_mut() -= limit;
-                self.checkpoints.push(limit);
+                self.checkpoints.push(*limit);
                 Ok(())
             }
-            _ => Err(VmError::OutOfGas),
+            VmGasCheckpoint::Limited(_) => Err(VmError::OutOfGas),
         }
     }
 
@@ -88,6 +89,45 @@ impl Gas {
         } else {
             Err(VmError::OutOfGas)
         }
+    }
+}
+
+pub type QueryCustomOf<T> = <T as CustomHandler>::QueryCustom;
+pub type MessageCustomOf<T> = <T as CustomHandler>::MessageCustom;
+
+pub trait CustomHandler: Sized + Clone + Default {
+    type QueryCustom: DeserializeOwned + Debug;
+    type MessageCustom: DeserializeOwned + Debug;
+
+    fn handle_message<AH: AddressHandler>(
+        vm: &mut Context<Self, AH>,
+        message: Self::MessageCustom,
+        event_handler: &mut dyn FnMut(Event),
+    ) -> Result<Option<Binary>, VmError>;
+
+    fn handle_query<AH: AddressHandler>(
+        vm: &mut Context<Self, AH>,
+        query: Self::QueryCustom,
+    ) -> Result<SystemResult<CosmwasmQueryResult>, VmError>;
+}
+
+impl CustomHandler for () {
+    type QueryCustom = ();
+    type MessageCustom = ();
+
+    fn handle_message<AH: AddressHandler>(
+        _: &mut Context<Self, AH>,
+        _: Self::MessageCustom,
+        _: &mut dyn FnMut(Event),
+    ) -> Result<Option<Binary>, VmError> {
+        Err(VmError::NoCustomMessage)
+    }
+
+    fn handle_query<AH: AddressHandler>(
+        _: &mut Context<Self, AH>,
+        _: Self::QueryCustom,
+    ) -> Result<SystemResult<CosmwasmQueryResult>, VmError> {
+        Err(VmError::NoCustomQuery)
     }
 }
 
@@ -134,14 +174,15 @@ impl IbcState {
 pub type IbcChannelId = String;
 
 #[derive(Default, Clone)]
-pub struct Db {
+pub struct Db<CH> {
     pub ibc: BTreeMap<IbcChannelId, IbcState>,
     pub contracts: BTreeMap<Account, CosmwasmContractMeta<Account>>,
     pub storage: BTreeMap<Account, Storage>,
     pub bank: Bank,
+    pub custom_handler: CH,
 }
 
-impl Debug for Db {
+impl<CH: CustomHandler> Debug for Db<CH> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Db")
             .field("ibc", &self.ibc)
@@ -151,15 +192,15 @@ impl Debug for Db {
     }
 }
 
-pub struct Context<'a> {
+pub struct Context<'a, CH: CustomHandler, AH: AddressHandler> {
     pub host_functions: BTreeMap<WasmiHostFunctionIndex, WasmiHostFunction<Self>>,
     pub executing_module: WasmiModule,
     pub env: Env,
     pub info: MessageInfo,
-    pub state: &'a mut State,
+    pub state: &'a mut State<CH, AH>,
 }
 
-impl<'a> WasmiModuleExecutor for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> WasmiModuleExecutor for Context<'a, CH, AH> {
     fn executing_module(&self) -> WasmiModule {
         self.executing_module.clone()
     }
@@ -168,11 +209,11 @@ impl<'a> WasmiModuleExecutor for Context<'a> {
     }
 }
 
-impl<'a> Pointable for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> Pointable for Context<'a, CH, AH> {
     type Pointer = u32;
 }
 
-impl<'a> ReadableMemory for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> ReadableMemory for Context<'a, CH, AH> {
     type Error = VmErrorOf<Self>;
     fn read(&self, offset: Self::Pointer, buffer: &mut [u8]) -> Result<(), Self::Error> {
         self.executing_module
@@ -182,7 +223,7 @@ impl<'a> ReadableMemory for Context<'a> {
     }
 }
 
-impl<'a> WritableMemory for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> WritableMemory for Context<'a, CH, AH> {
     type Error = VmErrorOf<Self>;
     fn write(&self, offset: Self::Pointer, buffer: &[u8]) -> Result<(), Self::Error> {
         self.executing_module
@@ -192,14 +233,14 @@ impl<'a> WritableMemory for Context<'a> {
     }
 }
 
-impl<'a> ReadWriteMemory for Context<'a> {}
+impl<'a, CH: CustomHandler, AH: AddressHandler> ReadWriteMemory for Context<'a, CH, AH> {}
 
-impl<'a> Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> Context<'a, CH, AH> {
     fn load_subvm<R>(
         &mut self,
         address: <Self as VMBase>::Address,
         funds: Vec<Coin>,
-        f: impl FnOnce(&mut WasmiVM<Context>) -> R,
+        f: impl FnOnce(&mut WasmiVM<Context<CH, AH>>) -> R,
     ) -> Result<R, VmErrorOf<Self>> {
         log::debug!(
             "Loading sub-vm {:?} => {:?}",
@@ -220,13 +261,13 @@ impl<'a> Context<'a> {
             .ok_or(VmError::CodeNotFound(code_id))
             .cloned()?;
         let host_functions_definitions =
-            WasmiImportResolver(host_functions::definitions::<Context>());
+            WasmiImportResolver(host_functions::definitions::<Context<CH, AH>>());
         let module = new_wasmi_vm(&host_functions_definitions, &code.1)?;
-        let mut sub_vm: WasmiVM<Context> = WasmiVM(Context {
+        let mut sub_vm: WasmiVM<Context<CH, AH>> = WasmiVM(Context {
             host_functions: host_functions_definitions
                 .0
                 .into_iter()
-                .flat_map(|(_, modules)| modules.into_iter().map(|(_, function)| function))
+                .flat_map(|(_, modules)| modules.into_values())
                 .collect(),
             executing_module: module,
             env: Env {
@@ -246,11 +287,11 @@ impl<'a> Context<'a> {
     }
 }
 
-impl<'a> VMBase for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> VMBase for Context<'a, CH, AH> {
     type Input<'x> = WasmiInput<'x, WasmiVM<Self>>;
     type Output<'x> = WasmiOutput<'x, WasmiVM<Self>>;
-    type QueryCustom = Empty;
-    type MessageCustom = Empty;
+    type QueryCustom = QueryCustomOf<CH>;
+    type MessageCustom = MessageCustomOf<CH>;
     type ContractMeta = CosmwasmContractMeta<Account>;
     type Address = Account;
     type CanonicalAddress = CanonicalAccount;
@@ -300,7 +341,7 @@ impl<'a> VMBase for Context<'a> {
         message: &[u8],
     ) -> Result<QueryResult, Self::Error> {
         self.load_subvm(address, vec![], |sub_vm| {
-            cosmwasm_call::<QueryCall, WasmiVM<Context>>(sub_vm, message)
+            cosmwasm_call::<QueryCall, WasmiVM<Context<CH, AH>>>(sub_vm, message)
         })?
     }
 
@@ -337,7 +378,7 @@ impl<'a> VMBase for Context<'a> {
             .codes
             .get(&contract_meta.code_id)
             .ok_or(VmError::CodeNotFound(contract_meta.code_id))?;
-        let address = Account::generate(code_hash, message);
+        let address = Account::generate::<AH>(code_hash, message)?;
 
         self.state
             .db
@@ -389,17 +430,17 @@ impl<'a> VMBase for Context<'a> {
 
     fn query_custom(
         &mut self,
-        _: Self::QueryCustom,
+        query: Self::QueryCustom,
     ) -> Result<SystemResult<CosmwasmQueryResult>, Self::Error> {
-        Err(VmError::NoCustomQuery)
+        CH::handle_query(self, query)
     }
 
     fn message_custom(
         &mut self,
-        _: Self::MessageCustom,
-        _: &mut dyn FnMut(Event),
+        message: Self::MessageCustom,
+        event_handler: &mut dyn FnMut(Event),
     ) -> Result<Option<Binary>, Self::Error> {
-        Err(VmError::NoCustomMessage)
+        CH::handle_message(self, message, event_handler)
     }
 
     fn query_raw(
@@ -412,7 +453,7 @@ impl<'a> VMBase for Context<'a> {
             .db
             .storage
             .get(&address)
-            .unwrap_or(&Default::default())
+            .unwrap_or(&Storage::default())
             .data
             .get(&key)
             .cloned())
@@ -521,7 +562,7 @@ impl<'a> VMBase for Context<'a> {
             Ok(iterator.data[position].clone())
         } else {
             // Empty data works like `None` in rust iterators
-            Ok((Default::default(), Default::default()))
+            Ok((Vec::default(), Vec::default()))
         }
     }
 
@@ -568,74 +609,27 @@ impl<'a> VMBase for Context<'a> {
     }
 
     fn addr_validate(&mut self, input: &str) -> Result<Result<(), Self::Error>, Self::Error> {
-        let canonical = match self.addr_canonicalize(input)? {
-            Ok(canonical) => canonical,
-            Err(e) => return Ok(Err(e)),
-        };
-        let normalized = match self.addr_humanize(&canonical)? {
-            Ok(canonical) => canonical,
-            Err(e) => return Ok(Err(e)),
-        };
-        let account = Account::try_from(input.to_string())?;
-        if account != normalized {
-            Ok(Err(VmError::InvalidAddress))
-        } else {
-            Ok(Ok(()))
-        }
+        Ok(AH::addr_validate(input))
     }
 
     fn addr_canonicalize(
         &mut self,
         input: &str,
     ) -> Result<Result<Self::CanonicalAddress, Self::Error>, Self::Error> {
-        // mimicks formats like hex or bech32 where different casings are valid for one address
-        let normalized = input.to_lowercase();
-
-        // Dummy input validation. This is more sophisticated for formats like bech32, where format and checksum are validated.
-        if normalized.len() < 3 {
-            return Ok(Err(VmError::InvalidAddress));
+        match AH::addr_canonicalize(input) {
+            Ok(canonical) => Ok(canonical.try_into()),
+            Err(e) => Ok(Err(e)),
         }
-
-        if normalized.len() > CANONICAL_LENGTH {
-            return Ok(Err(VmError::InvalidAddress));
-        }
-
-        let mut out = Vec::from(normalized);
-        // pad to canonical length with NULL bytes
-        out.resize(CANONICAL_LENGTH, 0x00);
-        // content-dependent rotate followed by shuffle to destroy
-        let rotate_by = digit_sum(&out) % CANONICAL_LENGTH;
-        out.rotate_left(rotate_by);
-        for _ in 0..SHUFFLES_ENCODE {
-            out = riffle_shuffle(&out);
-        }
-        Ok(Ok(out.try_into()?))
     }
 
     fn addr_humanize(
         &mut self,
         addr: &Self::CanonicalAddress,
     ) -> Result<Result<Self::Address, Self::Error>, Self::Error> {
-        if addr.0.len() != CANONICAL_LENGTH {
-            return Ok(Err(VmError::InvalidAddress));
+        match AH::addr_humanize(addr.0.as_ref()) {
+            Ok(addr) => Ok(addr.try_into()),
+            Err(e) => Ok(Err(e)),
         }
-
-        let mut tmp: Vec<u8> = addr.clone().into();
-        // Shuffle two more times which restored the original value (24 elements are back to original after 20 rounds)
-        for _ in 0..SHUFFLES_DECODE {
-            tmp = riffle_shuffle(&tmp);
-        }
-        // Rotate back
-        let rotate_by = digit_sum(&tmp) % CANONICAL_LENGTH;
-        tmp.rotate_right(rotate_by);
-        // Remove NULL bytes (i.e. the padding)
-        let trimmed = tmp.into_iter().filter(|&x| x != 0x00).collect();
-        // decode UTF-8 bytes into string
-        let human = match String::from_utf8(trimmed) {
-            Ok(trimmed) => trimmed,
-            Err(_) => return Ok(Err(VmError::InvalidAddress)),
-        };
-        Ok(Account::try_from(human).map_err(|_| VmError::InvalidAddress))
     }
 
     fn db_read(
@@ -690,7 +684,7 @@ impl<'a> VMBase for Context<'a> {
 
     fn charge(&mut self, value: VmGas) -> Result<(), Self::Error> {
         let gas_to_charge = match value {
-            VmGas::Instrumentation { metered } => metered as u64,
+            VmGas::Instrumentation { metered } => u64::from(metered),
             x => {
                 log::debug!("Charging gas: {:?}", x);
                 1u64
@@ -702,7 +696,7 @@ impl<'a> VMBase for Context<'a> {
 
     fn gas_checkpoint_push(&mut self, checkpoint: VmGasCheckpoint) -> Result<(), Self::Error> {
         log::debug!("> Gas before: {:?}", self.state.gas);
-        self.state.gas.push(checkpoint)?;
+        self.state.gas.push(&checkpoint)?;
         log::debug!("> Gas after: {:?}", self.state.gas);
         Ok(())
     }
@@ -774,18 +768,18 @@ impl<'a> VMBase for Context<'a> {
     }
 }
 
-impl<'a> Has<Env> for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> Has<Env> for Context<'a, CH, AH> {
     fn get(&self) -> Env {
         self.env.clone()
     }
 }
-impl<'a> Has<MessageInfo> for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> Has<MessageInfo> for Context<'a, CH, AH> {
     fn get(&self) -> MessageInfo {
         self.info.clone()
     }
 }
 
-impl<'a> Transactional for Context<'a> {
+impl<'a, CH: CustomHandler, AH: AddressHandler> Transactional for Context<'a, CH, AH> {
     type Error = VmError;
     fn transaction_begin(&mut self) -> Result<(), Self::Error> {
         self.state.transactions.push_back(self.state.db.clone());
@@ -818,23 +812,4 @@ impl Rules for ConstantCostRules {
             NonZeroU32::new(1024).expect("impossible"),
         )
     }
-}
-
-fn digit_sum(input: &[u8]) -> usize {
-    input.iter().fold(0, |sum, val| sum + (*val as usize))
-}
-
-fn riffle_shuffle<T: Clone>(input: &[T]) -> Vec<T> {
-    assert!(
-        input.len() % 2 == 0,
-        "Method only defined for even number of elements"
-    );
-    let mid = input.len() / 2;
-    let (left, right) = input.split_at(mid);
-    let mut out = Vec::<T>::with_capacity(input.len());
-    for i in 0..mid {
-        out.push(right[i].clone());
-        out.push(left[i].clone());
-    }
-    out
 }

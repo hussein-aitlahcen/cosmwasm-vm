@@ -1,6 +1,6 @@
 use crate::{
-    vm::{Account, IbcState, State, VmError},
-    Api, Direct,
+    vm::{Account, AddressHandler, Context, CustomHandler, IbcState, State, VmError},
+    Api as IApi, Direct, Dispatch,
 };
 use cosmwasm_std::{
     Env, Ibc3ChannelOpenResponse, IbcAcknowledgement, IbcChannel, IbcChannelConnectMsg,
@@ -10,19 +10,23 @@ use cosmwasm_std::{
 
 pub type ConnectionId = String;
 
-pub struct IbcNetwork<'a> {
-    pub state: &'a mut State,
-    pub state_counterparty: &'a mut State,
+#[allow(clippy::module_name_repetitions)]
+pub struct IbcNetwork<'a, CH, AH> {
+    pub state: &'a mut State<CH, AH>,
+    pub state_counterparty: &'a mut State<CH, AH>,
 }
 
-impl<'a> IbcNetwork<'a> {
-    pub fn new(state: &'a mut State, state_counterparty: &'a mut State) -> IbcNetwork<'a> {
+type Api<'a, E, CH, AH> = IApi<'a, E, AH, State<CH, AH>, Context<'a, CH, AH>>;
+
+impl<'a, CH: CustomHandler, AH: AddressHandler> IbcNetwork<'a, CH, AH> {
+    pub fn new(state: &'a mut State<CH, AH>, state_counterparty: &'a mut State<CH, AH>) -> Self {
         IbcNetwork {
             state,
             state_counterparty,
         }
     }
 
+    #[must_use]
     pub fn reverse(self) -> Self {
         Self::new(self.state_counterparty, self.state)
     }
@@ -41,24 +45,24 @@ impl<'a> IbcNetwork<'a> {
         gas: u64,
         a: &A,
         a_counterparty: &A,
-        mut pre: impl FnMut(&mut State, &mut State, &A, &A),
-        mut post: impl FnMut(&mut State, &mut State, &A, &A),
+        mut pre: impl FnMut(&mut State<CH, AH>, &mut State<CH, AH>, &A, &A),
+        mut post: impl FnMut(&mut State<CH, AH>, &mut State<CH, AH>, &A, &A),
     ) -> Result<(), VmError> {
         pre(self.state, self.state_counterparty, a, a_counterparty);
-        ibc_relay(
-            channel.clone(),
+        ibc_relay::<CH, AH>(
+            &channel,
             self.state,
             self.state_counterparty,
-            env.clone(),
-            env_counterparty.clone(),
-            info.clone(),
-            info_counterparty.clone(),
+            &env,
+            &env_counterparty,
+            &info,
+            &info_counterparty,
             gas,
         )?;
         post(self.state, self.state_counterparty, a, a_counterparty);
         let mut network_reversed = IbcNetwork::new(self.state_counterparty, self.state);
         if network_reversed.relay_required(&channel)? {
-            network_reversed.relay(
+            network_reversed.relay::<A>(
                 ibc_reverse_channel(channel),
                 env_counterparty,
                 env,
@@ -104,12 +108,12 @@ impl<'a> IbcNetwork<'a> {
         );
 
         // Step 1, OpenInit/Try
-        let override_version = Api::<Direct>::ibc_channel_open(
+        let override_version = Api::<Direct, CH, AH>::ibc_channel_open(
             self.state,
             env.clone(),
             info.clone(),
             gas,
-            IbcChannelOpenMsg::OpenInit {
+            &IbcChannelOpenMsg::OpenInit {
                 channel: channel.clone(),
             },
         )?
@@ -119,15 +123,15 @@ impl<'a> IbcNetwork<'a> {
 
         // The contract may override the channel version.
         if let Some(Ibc3ChannelOpenResponse { version }) = override_version {
-            channel.version = version
+            channel.version = version;
         }
 
-        let override_version_counterparty = Api::<Direct>::ibc_channel_open(
+        let override_version_counterparty = Api::<Direct, CH, AH>::ibc_channel_open(
             self.state_counterparty,
             env_counterparty.clone(),
             info_counterparty.clone(),
             gas,
-            IbcChannelOpenMsg::OpenTry {
+            &IbcChannelOpenMsg::OpenTry {
                 channel: channel.clone(),
                 counterparty_version: channel.version.clone(),
             },
@@ -138,29 +142,29 @@ impl<'a> IbcNetwork<'a> {
 
         // The contract counterparty may override the channel version.
         if let Some(Ibc3ChannelOpenResponse { version }) = override_version_counterparty {
-            channel.version = version
+            channel.version = version;
         }
 
         let channel_counterparty = ibc_reverse_channel(channel.clone());
 
         // Step 2, OpenAck/Confirm
-        let result = <Api>::ibc_channel_connect(
+        let result = Api::<Dispatch, CH, AH>::ibc_channel_connect(
             self.state,
             env,
             info,
             gas,
-            IbcChannelConnectMsg::OpenAck {
+            &IbcChannelConnectMsg::OpenAck {
                 channel: channel_counterparty.clone(),
                 counterparty_version: channel_counterparty.version.clone(),
             },
         )?;
         log::debug!("Handshake: {:?}", result);
-        let result = <Api>::ibc_channel_connect(
+        let result = Api::<Dispatch, CH, AH>::ibc_channel_connect(
             self.state_counterparty,
             env_counterparty,
             info_counterparty,
             gas,
-            IbcChannelConnectMsg::OpenConfirm {
+            &IbcChannelConnectMsg::OpenConfirm {
                 channel: channel_counterparty,
             },
         )?;
@@ -180,6 +184,8 @@ impl<'a> IbcNetwork<'a> {
     }
 }
 
+#[must_use]
+#[allow(clippy::module_name_repetitions)]
 pub fn ibc_reverse_channel(channel: IbcChannel) -> IbcChannel {
     IbcChannel::new(
         channel.counterparty_endpoint,
@@ -190,7 +196,11 @@ pub fn ibc_reverse_channel(channel: IbcChannel) -> IbcChannel {
     )
 }
 
-pub fn ibc_relay_required(channel: &IbcChannel, state: &State) -> Result<bool, VmError> {
+#[allow(clippy::module_name_repetitions)]
+pub fn ibc_relay_required<CH: CustomHandler, AH: AddressHandler>(
+    channel: &IbcChannel,
+    state: &State<CH, AH>,
+) -> Result<bool, VmError> {
     let channel_state = state
         .db
         .ibc
@@ -199,14 +209,15 @@ pub fn ibc_relay_required(channel: &IbcChannel, state: &State) -> Result<bool, V
     Ok(channel_state != &IbcState::default())
 }
 
-pub fn ibc_relay(
-    channel: IbcChannel,
-    state: &mut State,
-    state_counterparty: &mut State,
-    env: Env,
-    env_counterparty: Env,
-    info: MessageInfo,
-    info_counterparty: MessageInfo,
+#[allow(clippy::module_name_repetitions)]
+pub fn ibc_relay<CH: CustomHandler, AH: AddressHandler>(
+    channel: &IbcChannel,
+    state: &mut State<CH, AH>,
+    state_counterparty: &mut State<CH, AH>,
+    env: &Env,
+    env_counterparty: &Env,
+    info: &MessageInfo,
+    info_counterparty: &MessageInfo,
     gas: u64,
 ) -> Result<(), VmError> {
     let relayer = Account::try_from(info.sender.clone())?;
@@ -218,12 +229,12 @@ pub fn ibc_relay(
         .ok_or(VmError::UnknownIbcChannel)?;
     if channel_state.request_close {
         for packet in channel_state.packets.drain(0..).collect::<Vec<_>>() {
-            <Api>::ibc_packet_timeout(
+            Api::<Dispatch, CH, AH>::ibc_packet_timeout(
                 state,
                 env.clone(),
                 info.clone(),
                 gas,
-                IbcPacketTimeoutMsg::new(
+                &IbcPacketTimeoutMsg::new(
                     cosmwasm_std::IbcPacket::new(
                         packet.data,
                         channel.endpoint.clone(),
@@ -239,12 +250,12 @@ pub fn ibc_relay(
         for packet in channel_state.packets.drain(0..).collect::<Vec<_>>() {
             log::info!("Relaying: {:?}", packet);
             // TODO: check timeout after env passed as parameter to Full methods
-            let (ack, _) = <Api>::ibc_packet_receive(
+            let (ack, _) = Api::<Dispatch, CH, AH>::ibc_packet_receive(
                 state_counterparty,
                 env_counterparty.clone(),
                 info_counterparty.clone(),
                 gas,
-                IbcPacketReceiveMsg::new(
+                &IbcPacketReceiveMsg::new(
                     cosmwasm_std::IbcPacket::new(
                         packet.data.clone(),
                         channel.endpoint.clone(),
@@ -256,12 +267,12 @@ pub fn ibc_relay(
                 ),
             )?;
             log::info!("Packet ACK: {:?}", ack);
-            <Api>::ibc_packet_ack(
+            Api::<Dispatch, CH, AH>::ibc_packet_ack(
                 state,
                 env.clone(),
                 info.clone(),
                 gas,
-                IbcPacketAckMsg::new(
+                &IbcPacketAckMsg::new(
                     IbcAcknowledgement::new(ack.unwrap()),
                     cosmwasm_std::IbcPacket::new(
                         packet.data,

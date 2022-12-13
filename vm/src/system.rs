@@ -72,6 +72,7 @@ const CUSTOM_CONTRACT_EVENT_TYPE_MIN_LENGTH: usize = 2;
 const WASM_MODULE_EVENT_RESERVED_PREFIX: &str = "_";
 
 #[allow(unused)]
+#[allow(clippy::module_name_repetitions)]
 pub enum SystemEventType {
     StoreCode,
     Instantiate,
@@ -93,6 +94,7 @@ pub enum SystemEventType {
     IbcPacketTimeout,
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub enum SystemAttributeKey {
     ContractAddr,
     CodeID,
@@ -100,11 +102,13 @@ pub enum SystemAttributeKey {
     Feature,
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub struct SystemAttribute {
     key: SystemAttributeKey,
     value: String,
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub struct SystemEvent {
     ty: SystemEventType,
     attributes: Vec<SystemAttribute>,
@@ -149,7 +153,7 @@ impl Display for SystemEventType {
             SystemEventType::IbcPacketTimeout => IbcPacketTimeoutCall::<Empty>::NAME,
         };
 
-        write!(f, "{}", event_str)
+        write!(f, "{event_str}")
     }
 }
 
@@ -272,7 +276,7 @@ where
                 addr_attr,
                 SystemAttribute {
                     key: SystemAttributeKey::CodeID,
-                    value: format!("{}", code_id),
+                    value: format!("{code_id}"),
                 },
             ]
         } else {
@@ -288,6 +292,7 @@ where
 
 /// Errors likely to happen while a VM is executing.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[allow(clippy::module_name_repetitions)]
 pub enum SystemError {
     UnsupportedMessage,
     FailedToSerialize,
@@ -366,7 +371,7 @@ where
         + Into<ContractResult<Response<VmMessageCustomOf<Self>>>>;
 
 #[cfg(feature = "stargate")]
-/// Extra constraints required by stargate enabled CosmWasm VM (a.k.a. IBC capable).
+/// Extra constraints required by stargate enabled `CosmWasm` VM (a.k.a. IBC capable).
 pub trait StargateCosmwasmCallVM = CosmwasmBaseVM
 where
     for<'x> VmInputOf<'x, Self>: TryFrom<
@@ -404,9 +409,9 @@ where
     )
 }
 
-/// High level dispatch for a CosmWasm VM.
+/// High level dispatch for a `CosmWasm` VM.
 /// This call will manage and handle subcall as well as the transactions etc...
-/// The implementation must be semantically valid w.r.t https://github.com/CosmWasm/cosmwasm/blob/main/SEMANTICS.md
+/// The implementation must be semantically valid w.r.t <https://github.com/CosmWasm/cosmwasm/blob/main/SEMANTICS.md>
 ///
 /// Returns either the value produced by the contract along the generated events or a `VmErrorOf<V>`
 pub fn cosmwasm_system_entrypoint<I, V>(
@@ -432,6 +437,28 @@ where
             Err(e)
         }
     }
+}
+
+/// Set `new_code_id` as the code id of the contract `contract_addr`
+///
+/// Fails if the caller is not the admin of the contract
+pub fn migrate<V: CosmwasmBaseVM>(
+    vm: &mut V,
+    sender: VmAddressOf<V>,
+    contract_addr: VmAddressOf<V>,
+    new_code_id: CosmwasmCodeId,
+) -> Result<(), VmErrorOf<V>> {
+    let CosmwasmContractMeta { admin, label, .. } = vm.contract_meta(contract_addr.clone())?;
+    ensure_admin::<V>(&sender.into(), admin.clone())?;
+    vm.set_contract_meta(
+        contract_addr,
+        CosmwasmContractMeta {
+            code_id: new_code_id,
+            admin,
+            label,
+        },
+    )?;
+    Ok(())
 }
 
 /// Set `new_admin` as the new admin of the contract `contract_addr`
@@ -507,6 +534,7 @@ fn sanitize_custom_attributes(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn dispatch_submessage<V, I>(
     vm: &mut V,
     info: &MessageInfo,
@@ -571,19 +599,10 @@ where
                 new_code_id,
                 msg: Binary(msg),
             } => {
-                let vm_contract_addr = VmAddressOf::<V>::try_from(contract_addr)?;
-                let CosmwasmContractMeta { admin, label, .. } =
-                    vm.contract_meta(vm_contract_addr.clone())?;
-                ensure_admin::<V>(&info.sender, admin.clone())?;
-                vm.set_contract_meta(
-                    vm_contract_addr.clone(),
-                    CosmwasmContractMeta {
-                        code_id: new_code_id,
-                        admin,
-                        label,
-                    },
-                )?;
-                vm.continue_migrate(vm_contract_addr, &msg, &mut sub_event_handler)
+                let contract_addr = VmAddressOf::<V>::try_from(contract_addr)?;
+                let sender = VmAddressOf::<V>::try_from(info.sender.clone().into_string())?;
+                migrate::<V>(vm, sender, contract_addr.clone(), new_code_id)?;
+                vm.continue_migrate(contract_addr, &msg, &mut sub_event_handler)
             }
             WasmMsg::UpdateAdmin {
                 contract_addr,
@@ -653,6 +672,7 @@ where
     sub_result.map(|data| (data, sub_events))
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn cosmwasm_system_run<I, V>(
     vm: &mut V,
     message: &[u8],
@@ -707,7 +727,7 @@ where
                     env.contract.address.clone().into_string(),
                 )?;
                 event_handler(
-                    Event::new(format!("{}{}", CUSTOM_CONTRACT_EVENT_PREFIX, ty))
+                    Event::new(format!("{CUSTOM_CONTRACT_EVENT_PREFIX}{ty}"))
                         .add_attributes(attributes),
                 );
             }
@@ -766,7 +786,7 @@ where
                         (Err(e), ReplyOn::Always | ReplyOn::Error) => {
                             log::debug!("Rollback & Reply");
                             vm.transaction_rollback()?;
-                            SubCallContinuation::Reply(SubMsgResult::Err(format!("{:?}", e)))
+                            SubCallContinuation::Reply(SubMsgResult::Err(format!("{e:?}")))
                         }
                         // If an error happen and we did not expected it, abort
                         // the whole transaction.
@@ -816,7 +836,7 @@ where
     }
 }
 
-/// High level query for a CosmWasm VM.
+/// High level query for a `CosmWasm` VM.
 ///
 /// Returns either the value returned by the contract `query` export or a `VmErrorOf<V>`
 pub fn cosmwasm_system_query<V>(
@@ -884,7 +904,7 @@ where
     }
 }
 
-/// High level query for a CosmWasm VM with remarshalling for contract execution continuation.
+/// High level query for a `CosmWasm` VM with remarshalling for contract execution continuation.
 ///
 /// Returns either the JSON serialized value returned by the contract `query` export or a `VmErrorOf<V>`
 pub fn cosmwasm_system_query_raw<V>(

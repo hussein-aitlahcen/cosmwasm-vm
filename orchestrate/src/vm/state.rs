@@ -1,10 +1,12 @@
 use super::{
     bank::{self, Bank},
-    Account, Context, Db, ExecutionType, Gas, IbcChannelId, IbcState, VmError,
+    Account, AddressHandler, Context, CustomHandler, Db, ExecutionType, Gas, IbcChannelId,
+    IbcState, VmError,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use core::fmt::Debug;
-use cosmwasm_std::{BlockInfo, Coin, ContractInfo, Env, MessageInfo, TransactionInfo};
+use core::marker::PhantomData;
+use cosmwasm_std::{BlockInfo, Coin, ContractInfo, Env, MessageInfo, Timestamp, TransactionInfo};
 use cosmwasm_vm::{
     executor::{
         cosmwasm_call, CosmwasmCallInput, CosmwasmCallWithoutInfoInput, DeserializeLimit,
@@ -12,13 +14,14 @@ use cosmwasm_vm::{
     },
     input::Input,
     memory::PointerOf,
-    system::{CosmwasmCallVM, CosmwasmCodeId, CosmwasmContractMeta, StargateCosmwasmCallVM},
-    vm::{VmErrorOf, VmInputOf},
+    system::{self, CosmwasmCallVM, CosmwasmCodeId, CosmwasmContractMeta, StargateCosmwasmCallVM},
+    vm::{VmErrorOf, VmInputOf, VmMessageCustomOf},
 };
 use cosmwasm_vm_wasmi::{host_functions, new_wasmi_vm, WasmiBaseVM, WasmiImportResolver, WasmiVM};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
+#[allow(clippy::module_name_repetitions)]
 pub trait VmState<'a, VM: WasmiBaseVM>
 where
     VmErrorOf<WasmiVM<VM>>: Into<VmError>,
@@ -45,6 +48,25 @@ where
         gas: u64,
         message: &[u8],
     ) -> Result<E::Output<VM>, VmError>;
+
+    /// Migrate a contract
+    fn do_migrate<E: ExecutionType>(
+        &'a mut self,
+        code_id: CosmwasmCodeId,
+        env: Env,
+        info: MessageInfo,
+        gas: u64,
+        message: &[u8],
+    ) -> Result<E::Output<VM>, VmError>;
+
+    /// Update admin of a contract
+    fn do_update_admin(
+        &'a mut self,
+        sender: &Account,
+        contract_addr: &Account,
+        new_admin: Option<Account>,
+        gas: u64,
+    ) -> Result<(), VmError>;
 
     /// Query a contract
     fn do_query(
@@ -85,17 +107,19 @@ where
             >;
 }
 
-#[derive(Default, Clone)]
-pub struct State {
-    pub transactions: VecDeque<Db>,
-    pub db: Db,
+#[derive(Clone)]
+pub struct State<CH, AH> {
+    pub transactions: VecDeque<Db<CH>>,
+    pub db: Db<CH>,
     pub codes: BTreeMap<CosmwasmCodeId, (Vec<u8>, Vec<u8>)>,
     pub gas: Gas,
+    _marker: PhantomData<AH>,
 }
 
-impl<'a> VmState<'a, Context<'a>> for State
+impl<'a, CH: CustomHandler + Clone, AH: AddressHandler> VmState<'a, Context<'a, CH, AH>>
+    for State<CH, AH>
 where
-    VmErrorOf<WasmiVM<Context<'a>>>: Into<VmError>,
+    VmErrorOf<WasmiVM<Context<'a, CH, AH>>>: Into<VmError>,
 {
     fn do_instantiate<E: ExecutionType>(
         &'a mut self,
@@ -107,16 +131,15 @@ where
         info: MessageInfo,
         gas: u64,
         message: &[u8],
-    ) -> Result<(Account, E::Output<Context<'a>>), VmError> {
-        let contract_addr = match contract {
-            Some(contract) => contract,
-            None => {
-                let (_, code_hash) = self
-                    .codes
-                    .get(&code_id)
-                    .ok_or(VmError::CodeNotFound(code_id))?;
-                Account::generate(code_hash, message)
-            }
+    ) -> Result<(Account, E::Output<Context<'a, CH, AH>>), VmError> {
+        let contract_addr = if let Some(contract) = contract {
+            contract
+        } else {
+            let (_, code_hash) = self
+                .codes
+                .get(&code_id)
+                .ok_or(VmError::CodeNotFound(code_id))?;
+            Account::generate::<AH>(code_hash, message)?
         };
         self.gas = Gas::new(gas);
         if self.db.contracts.contains_key(&contract_addr) {
@@ -142,7 +165,11 @@ where
             info,
         );
 
-        match E::raw_system_call::<_, InstantiateCall>(&mut vm, message) {
+        match E::raw_system_call::<
+            _,
+            InstantiateCall<VmMessageCustomOf<WasmiVM<Context<'a, CH, AH>>>>,
+        >(&mut vm, message)
+        {
             Ok(output) => Ok((contract_addr, output)),
             Err(e) => {
                 vm.0.state.db.contracts.remove(&contract_addr);
@@ -157,10 +184,68 @@ where
         info: MessageInfo,
         gas: u64,
         message: &[u8],
-    ) -> Result<E::Output<Context<'a>>, VmError> {
+    ) -> Result<E::Output<Context<'a, CH, AH>>, VmError> {
         self.gas = Gas::new(gas);
         let mut vm = create_vm(self, env, info);
-        E::raw_system_call::<Context<'a>, ExecuteCall>(&mut vm, message)
+        E::raw_system_call::<_, ExecuteCall<VmMessageCustomOf<WasmiVM<Context<'a, CH, AH>>>>>(
+            &mut vm, message,
+        )
+    }
+
+    fn do_migrate<E: ExecutionType>(
+        &'a mut self,
+        code_id: CosmwasmCodeId,
+        env: Env,
+        info: MessageInfo,
+        gas: u64,
+        message: &[u8],
+    ) -> Result<E::Output<Context<'a, CH, AH>>, VmError> {
+        self.gas = Gas::new(gas);
+
+        let contract: Account = env.contract.address.clone().try_into()?;
+        let sender: Account = info.sender.clone().try_into()?;
+        let mut vm = create_vm(self, env, info);
+
+        let mut meta = vm.contract_meta(contract.clone())?;
+        // Only admin can call this entrypoint
+        if meta.admin != Some(sender) {
+            return Err(VmError::NotAuthorized);
+        }
+        // Update the `code_id` if necessary
+        if meta.code_id != code_id {
+            meta.code_id = code_id;
+            vm.set_contract_meta(contract, meta)?;
+        }
+        E::raw_system_call::<_, ExecuteCall<VmMessageCustomOf<WasmiVM<Context<'a, CH, AH>>>>>(
+            &mut vm, message,
+        )
+    }
+
+    fn do_update_admin(
+        &'a mut self,
+        sender: &Account,
+        contract_addr: &Account,
+        new_admin: Option<Account>,
+        gas: u64,
+    ) -> Result<(), VmError> {
+        self.gas = Gas::new(gas);
+        let env = Env {
+            block: BlockInfo {
+                height: 0,
+                time: Timestamp::from_seconds(1),
+                chain_id: String::new(),
+            },
+            transaction: None,
+            contract: ContractInfo {
+                address: contract_addr.clone().into(),
+            },
+        };
+        let info = MessageInfo {
+            sender: sender.clone().into(),
+            funds: vec![],
+        };
+        let mut vm = create_vm(self, env, info.clone());
+        system::update_admin(&mut vm, &info.sender, contract_addr.clone(), new_admin)
     }
 
     fn do_ibc<E: ExecutionType, I>(
@@ -169,13 +254,13 @@ where
         info: MessageInfo,
         gas: u64,
         message: &[u8],
-    ) -> Result<E::Output<Context<'a>>, VmError>
+    ) -> Result<E::Output<Context<'a, CH, AH>>, VmError>
     where
-        WasmiVM<Context<'a>>: CosmwasmCallVM<I> + StargateCosmwasmCallVM,
+        WasmiVM<Context<'a, CH, AH>>: CosmwasmCallVM<I> + StargateCosmwasmCallVM,
     {
         self.gas = Gas::new(gas);
         let mut vm = create_vm(self, env, info);
-        E::raw_system_call::<Context<'a>, I>(&mut vm, message)
+        E::raw_system_call::<Context<'a, CH, AH>, I>(&mut vm, message)
     }
 
     fn do_query(
@@ -185,7 +270,7 @@ where
         message: &[u8],
     ) -> Result<QueryResult, VmError> {
         let mut vm = create_vm(self, env, info);
-        cosmwasm_call::<QueryCall, WasmiVM<Context>>(&mut vm, message)
+        cosmwasm_call::<QueryCall, WasmiVM<Context<CH, AH>>>(&mut vm, message)
     }
 
     fn do_direct<I>(
@@ -198,21 +283,21 @@ where
     where
         I: Input + HasInfo,
         I::Output: DeserializeOwned + ReadLimit + DeserializeLimit,
-        for<'x> VmInputOf<'x, WasmiVM<Context<'a>>>: TryFrom<
-                CosmwasmCallInput<'x, PointerOf<WasmiVM<Context<'x>>>, I>,
-                Error = VmErrorOf<WasmiVM<Context<'a>>>,
+        for<'x> VmInputOf<'x, WasmiVM<Context<'a, CH, AH>>>: TryFrom<
+                CosmwasmCallInput<'x, PointerOf<WasmiVM<Context<'x, CH, AH>>>, I>,
+                Error = VmErrorOf<WasmiVM<Context<'a, CH, AH>>>,
             > + TryFrom<
-                CosmwasmCallWithoutInfoInput<'x, PointerOf<WasmiVM<Context<'x>>>, I>,
-                Error = VmErrorOf<WasmiVM<Context<'a>>>,
+                CosmwasmCallWithoutInfoInput<'x, PointerOf<WasmiVM<Context<'x, CH, AH>>>, I>,
+                Error = VmErrorOf<WasmiVM<Context<'a, CH, AH>>>,
             >,
     {
         self.gas = Gas::new(gas);
         let mut vm = create_vm(self, env, info);
-        cosmwasm_call::<I, WasmiVM<Context<'a>>>(&mut vm, message)
+        cosmwasm_call::<I, WasmiVM<Context<'a, CH, AH>>>(&mut vm, message)
     }
 }
 
-impl Debug for State {
+impl<CH: CustomHandler, AH: AddressHandler> Debug for State<CH, AH> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("State")
             .field("db", &self.db)
@@ -221,25 +306,33 @@ impl Debug for State {
     }
 }
 
-impl State {
+impl<CH: CustomHandler, AH: AddressHandler> State<CH, AH> {
+    #[must_use]
     pub fn new(
         codes: Vec<Vec<u8>>,
         initial_balances: Vec<(Account, Coin)>,
         ibc_channels: Vec<IbcChannelId>,
+        custom_handler: CH,
     ) -> Self {
         let mut code_id = 0;
         Self {
-            codes: BTreeMap::from_iter(codes.into_iter().map(|code| {
-                code_id += 1;
-                let code_hash: Vec<u8> = Sha256::new().chain_update(&code).finalize()[..].into();
-                (code_id, (code_hash, code))
-            })),
+            codes: codes
+                .into_iter()
+                .map(|code| {
+                    code_id += 1;
+                    let code_hash: Vec<u8> =
+                        Sha256::new().chain_update(&code).finalize()[..].into();
+                    (code_id, (code_hash, code))
+                })
+                .collect::<BTreeMap<_, _>>(),
             gas: Gas::new(100_000_000),
             db: Db {
-                bank: if !initial_balances.is_empty() {
+                bank: if initial_balances.is_empty() {
+                    Bank::default()
+                } else {
                     let mut supply = bank::Supply::new();
                     let mut balances = bank::Balances::new();
-                    initial_balances.into_iter().for_each(|(account, coin)| {
+                    for (account, coin) in initial_balances {
                         supply
                             .entry(coin.denom.clone())
                             .and_modify(|amount| *amount += Into::<u128>::into(coin.amount))
@@ -253,23 +346,27 @@ impl State {
                                     .or_insert_with(|| (coin.amount.into()));
                             })
                             .or_insert_with(|| [(coin.denom, coin.amount.into())].into());
-                    });
+                    }
                     Bank::new(supply, balances)
-                } else {
-                    Default::default()
                 },
                 ibc: ibc_channels
                     .into_iter()
                     .map(|x| (x, IbcState::default()))
                     .collect(),
+                custom_handler,
                 ..Default::default()
             },
-            transactions: Default::default(),
+            transactions: VecDeque::default(),
+            _marker: PhantomData,
         }
     }
 }
 
-fn create_vm(extension: &mut State, env: Env, info: MessageInfo) -> WasmiVM<Context> {
+fn create_vm<CH: CustomHandler, AH: AddressHandler>(
+    extension: &mut State<CH, AH>,
+    env: Env,
+    info: MessageInfo,
+) -> WasmiVM<Context<CH, AH>> {
     let code = extension
         .codes
         .get(
@@ -294,7 +391,7 @@ fn create_vm(extension: &mut State, env: Env, info: MessageInfo) -> WasmiVM<Cont
             .0
             .clone()
             .into_iter()
-            .flat_map(|(_, modules)| modules.into_iter().map(|(_, function)| function))
+            .flat_map(|(_, modules)| modules.into_values())
             .collect(),
         executing_module: module,
         env,

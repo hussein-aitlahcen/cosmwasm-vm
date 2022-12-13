@@ -11,6 +11,7 @@ use super::bank;
 use super::Account;
 
 #[derive(Debug)]
+#[allow(clippy::module_name_repetitions)]
 pub enum VmError {
     Interpreter(wasmi::Error),
     VMError(WasmiVMError),
@@ -31,6 +32,9 @@ pub enum VmError {
     UnknownIbcChannel,
     IbcChannelOpenFailure(String),
     Generic(String),
+    EncodingFailure,
+    DecodingFailure,
+    NotAuthorized,
 }
 
 impl From<wasmi::Error> for VmError {
@@ -77,7 +81,7 @@ impl From<bank::Error> for VmError {
 
 impl Display for VmError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 

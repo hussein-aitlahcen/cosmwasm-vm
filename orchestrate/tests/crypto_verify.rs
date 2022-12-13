@@ -1,6 +1,6 @@
 use cosmwasm_orchestrate::{
-    vm::{Account, State},
-    Api, Direct, StateBuilder,
+    vm::{Account, State, WasmAddressHandler},
+    Direct, StateBuilder, WasmApi as Api,
 };
 use cosmwasm_std::{from_binary, Binary, BlockInfo, ContractInfo, Env, MessageInfo, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ fn message_info(sender: &Account) -> MessageInfo {
     }
 }
 
-fn setup() -> (Account, State) {
+fn setup() -> (Account, State<(), WasmAddressHandler>) {
     let wasm_code = include_bytes!("../../fixtures/crypto_verify.wasm");
     let mut state = StateBuilder::new().add_code(wasm_code).build();
 
@@ -179,7 +179,7 @@ fn ethereum_signature_verify_works() {
 fn ethereum_signature_verify_fails_for_corrupted_message() {
     let (addr, mut state) = setup();
 
-    let message = format!("{}0", ETHEREUM_MESSAGE);
+    let message = format!("{ETHEREUM_MESSAGE}0");
     let signature = hex::decode(ETHEREUM_SIGNATURE_HEX).unwrap();
     let signer_address = ETHEREUM_SIGNER_ADDRESS;
 
@@ -211,7 +211,7 @@ fn ethereum_signature_verify_fails_for_corrupted_message() {
 fn ethereum_signature_verify_fails_for_corrupted_signature() {
     let (addr, mut state) = setup();
 
-    let message = format!("{}0", ETHEREUM_MESSAGE);
+    let message = format!("{ETHEREUM_MESSAGE}0");
     let mut signature = hex::decode(ETHEREUM_SIGNATURE_HEX).unwrap();
     signature[5] ^= 0x1;
     let signer_address = ETHEREUM_SIGNER_ADDRESS;
@@ -266,8 +266,8 @@ fn verify_ethereum_transaction_works() {
     let from = "0x0a65766695a712af41b5cfecaad217b1a11cb22a";
     let to = "0xe137f5264b6b528244e1643a2d570b37660b7f14";
     let gas_limit = 0x226c8;
-    let gas_price = 0x3b9aca00;
-    let value = 0x53177c;
+    let gas_price = 0x3b9a_ca00;
+    let value = 0x0053_177c;
     let data =
         hex::decode("536561726368207478207465737420302e36353930383639313733393634333335").unwrap();
     let r =
@@ -402,13 +402,12 @@ fn tendermint_signatures_batch_verify_works() {
         r#" 
     {{
         "verify_tendermint_batch": {{
-            "messages": {:?},
-            "signatures": {:?},
-            "public_keys": {:?}
+            "messages": {messages:?},
+            "signatures": {signatures:?},
+            "public_keys": {public_keys:?}
         }}
     }}
     "#,
-        messages, signatures, public_keys,
     );
 
     let res = <Api<Direct>>::query_raw(&mut state, get_env(&addr), verify_msg.as_bytes())
@@ -444,13 +443,12 @@ fn tendermint_signatures_batch_verify_message_multisig_works() {
         r#" 
     {{
         "verify_tendermint_batch": {{
-            "messages": {:?},
-            "signatures": {:?},
-            "public_keys": {:?}
+            "messages": {messages:?},
+            "signatures": {signatures:?},
+            "public_keys": {public_keys:?}
         }}
     }}
     "#,
-        messages, signatures, public_keys,
     );
 
     let res = <Api<Direct>>::query_raw(&mut state, get_env(&addr), verify_msg.as_bytes())
@@ -487,13 +485,12 @@ fn tendermint_signatures_batch_verify_single_public_key_works() {
         r#" 
     {{
         "verify_tendermint_batch": {{
-            "messages": {:?},
-            "signatures": {:?},
-            "public_keys": {:?}
+            "messages": {messages:?},
+            "signatures": {signatures:?},
+            "public_keys": {public_keys:?}
         }}
     }}
     "#,
-        messages, signatures, public_keys,
     );
 
     let res = <Api<Direct>>::query_raw(&mut state, get_env(&addr), verify_msg.as_bytes())
@@ -526,13 +523,12 @@ fn tendermint_signatures_batch_verify_fails() {
         r#" 
     {{
         "verify_tendermint_batch": {{
-            "messages": {:?},
-            "signatures": {:?},
-            "public_keys": {:?}
+            "messages": {messages:?},
+            "signatures": {signatures:?},
+            "public_keys": {public_keys:?}
         }}
     }}
     "#,
-        messages, signatures, public_keys,
     );
 
     let res = <Api<Direct>>::query_raw(&mut state, get_env(&addr), verify_msg.as_bytes())
