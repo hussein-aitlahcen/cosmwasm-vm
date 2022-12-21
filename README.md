@@ -1,3 +1,5 @@
+# The repository has been moved to https://github.com/ComposableFi/cosmwasm-vm
+
 # CosmWasm VM
 
 Experimental, minimalistic, `no_std` friendly abstract virtual machine for CosmWasm contracts execution.
